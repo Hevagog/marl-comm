@@ -1,0 +1,24 @@
+{"time":"2026-03-10T20:09:44.973109112+01:00","level":"INFO","msg":"stream: starting","core version":"0.25.0"}
+{"time":"2026-03-10T20:09:45.301722709+01:00","level":"INFO","msg":"stream: created new stream","id":"omyev4j8"}
+{"time":"2026-03-10T20:09:45.301768157+01:00","level":"INFO","msg":"handler: started","stream_id":"omyev4j8"}
+{"time":"2026-03-10T20:09:45.301797877+01:00","level":"INFO","msg":"stream: started","id":"omyev4j8"}
+{"time":"2026-03-10T20:09:45.301810603+01:00","level":"INFO","msg":"writer: started","stream_id":"omyev4j8"}
+{"time":"2026-03-10T20:09:45.301813688+01:00","level":"INFO","msg":"sender: started","stream_id":"omyev4j8"}
+{"time":"2026-03-10T20:09:54.01649392+01:00","level":"INFO","msg":"stream: closing","id":"omyev4j8"}
+{"time":"2026-03-10T20:09:56.269397393+01:00","level":"WARN","msg":"tensorboard: no root directory","error":"timed out after 10s"}
+{"time":"2026-03-10T20:09:56.269433702+01:00","level":"INFO","msg":"tensorboard: tracking new log directory","rootDir":{},"logDir":"LocalOrCloudPath(LocalPath=\"/home/hevagog/Studies/masters/marl-comm/runs/mappo_coingame\")","namespace":""}
+{"time":"2026-03-10T20:09:56.269947663+01:00","level":"INFO","msg":"tensorboard: saving file","fileLocation":"/home/hevagog/Studies/masters/marl-comm/runs/mappo_coingame/events.out.tfevents.1773169786.tkawiak","runPath":"runs/mappo_coingame/events.out.tfevents.1773169786.tkawiak"}
+{"time":"2026-03-10T20:09:56.270706375+01:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":124}
+{"time":"2026-03-10T20:09:56.271596366+01:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":56}
+{"time":"2026-03-10T20:09:56.275165432+01:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":788}
+{"time":"2026-03-10T20:09:56.276615482+01:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":188}
+{"time":"2026-03-10T20:09:56.276663744+01:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1009}
+{"time":"2026-03-10T20:09:56.276763276+01:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":2}
+{"time":"2026-03-10T20:09:56.276957803+01:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1115}
+{"time":"2026-03-10T20:09:56.277077752+01:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":8}
+{"time":"2026-03-10T20:09:56.277506463+01:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1236}
+{"time":"2026-03-10T20:09:56.283788376+01:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":1553}
+{"time":"2026-03-10T20:09:57.306425141+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-03-10T20:09:57.818388796+01:00","level":"INFO","msg":"handler: closed","stream_id":"omyev4j8"}
+{"time":"2026-03-10T20:09:57.818432529+01:00","level":"INFO","msg":"sender: closed","stream_id":"omyev4j8"}
+{"time":"2026-03-10T20:09:57.818438751+01:00","level":"INFO","msg":"stream: closed","id":"omyev4j8"}

@@ -1,0 +1,19 @@
+[project]
+name = "marl-comm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "flax[docs]>=0.12.1",
+    "jax[cuda13]>=0.8.1",
+    "numpy>=2.0.0",
+    "optax>=0.2.0",
+    "skrl[jax]>=1.4.3",
+    "pytest>=8.0.0",
+    "pygame>=2.5.0",
+    "tensorboardx>=2.6.4",
+    "tqdm>=4.66.0",
+    "wandb>=0.17.0",
+    "imageio[ffmpeg]>=2.34.0",
+]
