@@ -65,7 +65,8 @@ class CoinGameEnv:
     config : CoinGameConfig
         Environment configuration.
     render_mode : str or None
-        Rendering mode.  Currently only ``None`` is supported (headless).
+        Rendering mode: ``"human"`` (pygame window), ``"rgb_array"``
+        (off-screen NumPy array), or ``None`` (headless, default).
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "name": "coin_game_v0"}
@@ -109,6 +110,8 @@ class CoinGameEnv:
         self._agent_positions: dict[str, Tuple[int, int]] = {}
         self._red_coin_pos: Tuple[int, int] | None = None
         self._blue_coin_pos: Tuple[int, int] | None = None
+
+        self._renderer = None
 
     @property
     def possible_agents(self) -> list[str]:
@@ -270,10 +273,41 @@ class CoinGameEnv:
         return obs, rewards, terminated, truncated, infos
 
     def render(self) -> np.ndarray | None:
-        return None
+        """Render the current environment state.
+
+        Returns
+        -------
+        np.ndarray or None
+            An ``(H, W, 3)`` uint8 RGB array when ``render_mode == "rgb_array"``;
+            ``None`` when ``render_mode == "human"`` (frame displayed in a
+            pygame window) or when ``render_mode is None``.
+        """
+        if self._render_mode is None:
+            return None
+
+        if self._renderer is None:
+            from .rendering import CoinGameRenderer
+
+            self._renderer = CoinGameRenderer(
+                grid_size=self._config.grid_size,
+                render_mode=self._render_mode,
+                cell_size=self._config.cell_size,
+                fps=self._config.fps,
+            )
+
+        return self._renderer.render(
+            agent_positions=dict(self._agent_positions),
+            red_coin_pos=self._red_coin_pos,
+            blue_coin_pos=self._blue_coin_pos,
+            step=self._step_count,
+            max_steps=self._config.max_cycles,
+        )
 
     def close(self) -> None:
-        pass
+        """Shut down the renderer (if any) and release resources."""
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
 
     def _random_empty_cell(self, occupied: set[Tuple[int, int]]) -> Tuple[int, int]:
         """Return a random grid cell that is not in occupied.

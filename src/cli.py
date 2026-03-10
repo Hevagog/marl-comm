@@ -4,8 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
+from skrl.envs.wrappers.jax import wrap_env
 
-from environments.registry import make_wrapped_env
+
+from environments import make_coin_game_env
 from utils import load_config
 
 
@@ -45,7 +47,10 @@ def main() -> None:
     sys.path.insert(0, str(config_path.parent))
     cfg = load_config(config_path)
 
-    env = make_wrapped_env(cfg)
+    mode = "human" if args.task == "eval" else "rgb_array"
+
+    raw_env = make_coin_game_env(render_mode=mode)
+    env = wrap_env(raw_env, wrapper="pettingzoo")
 
     agent_type: str = cfg["experiment"].get("agent_type", "mappo")
     RunnerClass = _get_runner(agent_type)

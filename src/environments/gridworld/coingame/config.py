@@ -14,3 +14,9 @@ class CoinGameConfig:
 
     steal_penalty: float = -2.0
     """Penalty applied to the *other* agent when its colored coin is stolen."""
+
+    cell_size: int = 80
+    """Pixel width/height of each grid cell used by the renderer."""
+
+    fps: int = 10
+    """Target frames per second for ``render_mode="human"``."""
