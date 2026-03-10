@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
+        default="configs/mappo_default.py",
     )
     parser.add_argument(
         "--task",
@@ -46,6 +46,9 @@ def main() -> None:
     config_path = Path(args.config)
     sys.path.insert(0, str(config_path.parent))
     cfg = load_config(config_path)
+
+    if args.task in ["eval", "record"]:
+        cfg["experiment"]["wandb"] = False
 
     mode = "human" if args.task == "eval" else "rgb_array"
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import copy
 
 from skrl.memories.jax import RandomMemory
-from skrl.multi_agents.jax.mappo import MAPPO
+from skrl.multi_agents.jax.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
 
 from agents.mappo.models.generators import create_mappo_models
 from agents.runner import BaseRunner
-
-from .helper import build_mappo_cfg
 
 
 class MAPPORunner(BaseRunner):
@@ -29,7 +28,22 @@ class MAPPORunner(BaseRunner):
             cfg=cfg,
         )
 
-        mappo_cfg = build_mappo_cfg(cfg)
+        mappo_cfg = copy.deepcopy(MAPPO_DEFAULT_CONFIG)
+
+        project_mappo = cfg.get("mappo", {})
+        for key, value in project_mappo.items():
+            mappo_cfg[key] = value
+
+        exp = cfg.get("experiment", {})
+        mappo_cfg["experiment"]["directory"] = exp.get("directory", "")
+        mappo_cfg["experiment"]["experiment_name"] = exp.get("name", "")
+        mappo_cfg["experiment"]["write_interval"] = exp.get("write_interval", "auto")
+        mappo_cfg["experiment"]["checkpoint_interval"] = exp.get(
+            "checkpoint_interval", "auto"
+        )
+        mappo_cfg["experiment"]["store_separately"] = exp.get("store_separately", False)
+        mappo_cfg["experiment"]["wandb"] = exp.get("wandb", True)
+        mappo_cfg["experiment"]["wandb_kwargs"] = exp.get("wandb_kwargs", {})
 
         agent = MAPPO(
             possible_agents=env.possible_agents,
