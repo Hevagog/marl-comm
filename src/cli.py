@@ -17,8 +17,12 @@ def _get_runner(agent_type: str):
         from agents.train import MAPPORunner
 
         return MAPPORunner
+    if agent_type == "magic":
+        from agents.magic.train import MAGICRunner
+
+        return MAGICRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic']}"
     )
 
 
