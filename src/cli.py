@@ -8,6 +8,7 @@ from skrl.envs.wrappers.jax import wrap_env
 
 
 from environments import make_coin_game_env
+from environments.gridworld.coingame.config import CoinGameConfig
 from utils import load_config
 
 
@@ -52,7 +53,14 @@ def main() -> None:
 
     mode = "human" if args.task == "eval" else "rgb_array"
 
-    raw_env = make_coin_game_env(render_mode=mode)
+    env_cfg = cfg.get("env", {})
+    coin_config = CoinGameConfig(
+        grid_size=env_cfg.get("grid_size", 7),
+        max_cycles=env_cfg.get("max_cycles", 50),
+        pick_reward=env_cfg.get("pick_reward", 1.0),
+        steal_penalty=env_cfg.get("steal_penalty", -2.0),
+    )
+    raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
     env = wrap_env(raw_env, wrapper="pettingzoo")
 
     agent_type: str = cfg["experiment"].get("agent_type", "mappo")

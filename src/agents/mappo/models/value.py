@@ -3,8 +3,13 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 import flax.linen as nn
+import jax.numpy as jnp
 
 from skrl.models.jax import DeterministicMixin, Model
+
+# Orthogonal initialisation gains recommended by the MAPPO paper
+_HIDDEN_GAIN = jnp.sqrt(2.0)
+_OUTPUT_GAIN = 1.0
 
 
 class ValueNet(DeterministicMixin, Model):
@@ -30,8 +35,21 @@ class ValueNet(DeterministicMixin, Model):
     ):
         x = inputs["states"]
         for h in self.hidden_sizes:
-            x = nn.relu(nn.Dense(int(h))(x))
-        return nn.Dense(1)(x), {}
+            x = nn.tanh(
+                nn.Dense(
+                    int(h),
+                    kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                    bias_init=nn.initializers.constant(0.0),
+                )(x)
+            )
+        return (
+            nn.Dense(
+                1,
+                kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+                bias_init=nn.initializers.constant(0.0),
+            )(x),
+            {},
+        )
 
     @property
     def _modules(self):

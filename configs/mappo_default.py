@@ -1,8 +1,9 @@
 # fmt: off
+from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mappo_coingame",
+        "name":             "mappo_coingame_v3",
         "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
@@ -23,7 +24,7 @@ CONFIG = {
         "steal_penalty": -2.0,
     },
     "training": {
-        "timesteps": 2_000_000,
+        "timesteps": 8_000_000,
         "seed":      42,
     },
     "eval": {
@@ -37,23 +38,23 @@ CONFIG = {
         "fps":             4,
     },
     "mappo": {
-        "rollouts":        16,      # number of rollouts before updating
+        "rollouts":        2048,      # number of rollouts before updating
         "learning_epochs": 8,       # learning epochs per update
-        "mini_batches":    2,       # mini-batches per learning epoch
+        "mini_batches":    4,       # mini-batches per learning epoch
 
         "discount_factor": 0.99,    # gamma
         "lambda":          0.95,    # TD(lambda) / GAE lambda
 
-        "learning_rate":                  1e-3,
+        "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
-        "state_preprocessor":                None,
-        "state_preprocessor_kwargs":         {},
-        "shared_state_preprocessor":         None,
-        "shared_state_preprocessor_kwargs":  {},
-        "value_preprocessor":               None,
-        "value_preprocessor_kwargs":        {},
+        "state_preprocessor":                RunningStandardScaler,
+        "state_preprocessor_kwargs":         {"size": 11},
+        "shared_state_preprocessor":         RunningStandardScaler,
+        "shared_state_preprocessor_kwargs":  {"size": 22},
+        "value_preprocessor":               RunningStandardScaler,
+        "value_preprocessor_kwargs":        {"size": 1},
 
         "random_timesteps": 0,
         "learning_starts":  0,
@@ -63,25 +64,27 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale": 0.01,
+        "entropy_loss_scale": 0.02,
         "value_loss_scale":   0.5,
 
         "kl_threshold": 0,
 
         "rewards_shaper":       None,
-        "time_limit_bootstrap": False,
+        "time_limit_bootstrap": True,
+
+        "weight_decay":       1e-4,
     },
 
     "policy": {
-        "hidden_sizes":          [64, 64],
+        "hidden_sizes":          [128, 128],
         "unnormalized_log_prob": True,
     },
 
     "value": {
-        "hidden_sizes": [64, 64],
+        "hidden_sizes": [128, 128],
     },
 
     "memory": {
-        "size": 512,
+        "size": 2048,
     },
 }

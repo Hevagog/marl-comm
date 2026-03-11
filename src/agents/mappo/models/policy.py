@@ -1,14 +1,35 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Tuple, Union
 from collections.abc import Sequence
 
 import flax.linen as nn
+import jax
+import jax.numpy as jnp
+import numpy as np
 
 from skrl.models.jax import CategoricalMixin, Model
 
+# Orthogonal initialisation gains recommended by the MAPPO paper
+_HIDDEN_GAIN = jnp.sqrt(2.0)
+_OUTPUT_GAIN = 0.01
+
 
 class PolicyNet(CategoricalMixin, Model):
+    """Categorical policy that exposes logits as ``outputs["stddev"]``.
+
+    skrl's MAPPO ``_update_policy`` computes entropy via
+    ``get_entropy(outputs["stddev"])``.  The base ``CategoricalMixin`` fills
+    ``stddev`` with NaN (discrete actions have no std-dev), breaking entropy
+    regularisation.  This override stores the **logits** in that slot so that
+    ``CategoricalMixin.get_entropy`` (which calls ``_entropy(logits)``)
+    receives the correct input.
+
+    Activations are ``tanh`` and weights are orthogonally initialised
+    following Yu et al. 2021 ("The Surprising Effectiveness of PPO in
+    Cooperative, Multi-Agent Games").
+    """
+
     hidden_sizes: tuple = (64, 64)
 
     def __init__(
@@ -32,8 +53,34 @@ class PolicyNet(CategoricalMixin, Model):
     ):
         x = inputs["states"]
         for h in self.hidden_sizes:
-            x = nn.relu(nn.Dense(int(h))(x))
-        return nn.Dense(int(self.num_actions))(x), {}  # type: ignore[arg-type]
+            x = nn.tanh(
+                nn.Dense(
+                    int(h),
+                    kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                    bias_init=nn.initializers.constant(0.0),
+                )(x)
+            )
+        return (
+            nn.Dense(
+                int(self.num_actions),  # type: ignore[arg-type]
+                kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+                bias_init=nn.initializers.constant(0.0),
+            )(x),
+            {},
+        )
+
+    def act(
+        self,
+        inputs: Mapping[str, Union[Union[np.ndarray, jax.Array], Any]],
+        role: str = "",
+        params: Optional[jax.Array] = None,
+    ) -> Tuple[jax.Array, Union[jax.Array, None], Mapping[str, Union[jax.Array, Any]]]:
+        actions, log_prob, outputs = super().act(inputs, role, params)
+        # Replace the NaN placeholder with actual logits so that
+        # get_entropy(outputs["stddev"]) computes the correct categorical
+        # entropy inside _update_policy.
+        outputs["stddev"] = outputs["net_output"]
+        return actions, log_prob, outputs
 
     @property
     def _modules(self):

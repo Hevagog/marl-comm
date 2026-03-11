@@ -3,14 +3,15 @@ from __future__ import annotations
 import copy
 
 from skrl.memories.jax import RandomMemory
-from skrl.multi_agents.jax.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
+from skrl.multi_agents.jax.mappo import MAPPO_DEFAULT_CONFIG
 
+from agents.mappo.categorical_mappo import CategoricalMAPPO
 from agents.mappo.models.generators import create_mappo_models
 from agents.runner import BaseRunner
 
 
 class MAPPORunner(BaseRunner):
-    def _build_agent(self) -> MAPPO:
+    def _build_agent(self) -> CategoricalMAPPO:
         env = self._env
         cfg = self._cfg
 
@@ -45,7 +46,7 @@ class MAPPORunner(BaseRunner):
         mappo_cfg["experiment"]["wandb"] = exp.get("wandb", True)
         mappo_cfg["experiment"]["wandb_kwargs"] = exp.get("wandb_kwargs", {})
 
-        agent = MAPPO(
+        agent = CategoricalMAPPO(
             possible_agents=env.possible_agents,
             models=models,  # type: ignore[arg-type]
             memories=memories,
