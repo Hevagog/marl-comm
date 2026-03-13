@@ -3,7 +3,7 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mappo_coingame_v3",
+        "name":             "mappo_coingame_v7",
         "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
@@ -18,7 +18,7 @@ CONFIG = {
 
     "env": {
         "id":            "coingame",
-        "grid_size":     7,
+        "grid_size":     5,
         "max_cycles":    50,
         "pick_reward":   1.0,
         "steal_penalty": -2.0,
@@ -50,9 +50,9 @@ CONFIG = {
         "learning_rate_scheduler_kwargs": {},
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 11},
+        "state_preprocessor_kwargs":         {"size": 12},
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 22},
+        "shared_state_preprocessor_kwargs":  {"size": 24},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -64,15 +64,16 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale": 0.02,
-        "value_loss_scale":   0.5,
+        "entropy_loss_scale": 0.005,   # prevents premature entropy collapse in 4-action space
+        "value_loss_scale":   1.0,    # 1.0 is correct for separate policy/value optimisers
 
-        "kl_threshold": 0,
+        "kl_threshold": 0.02,        # KL early stopping (Bug 4 fix) — safety valve against catastrophic policy change
 
         "rewards_shaper":       None,
         "time_limit_bootstrap": True,
 
         "weight_decay":       1e-4,
+        "linear_lr_decay":    True,   # Bug 1 fix: linear LR decay from initial_lr to 0
     },
 
     "policy": {

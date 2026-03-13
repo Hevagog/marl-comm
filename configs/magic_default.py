@@ -3,7 +3,7 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "magic_coingame_v1",
+        "name":             "magic_coingame_v3",
         "agent_type":       "magic",
         "directory":        "runs",
         "wandb":            True,
@@ -18,7 +18,7 @@ CONFIG = {
 
     "env": {
         "id":            "coingame",
-        "grid_size":     7,
+        "grid_size":     5,
         "max_cycles":    50,
         "pick_reward":   1.0,
         "steal_penalty": -2.0,
@@ -54,9 +54,9 @@ CONFIG = {
         "learning_rate_scheduler_kwargs": {},
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 11},
+        "state_preprocessor_kwargs":         {"size": 12},
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 22},
+        "shared_state_preprocessor_kwargs":  {"size": 24},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -68,22 +68,23 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale": 0.02,
-        "value_loss_scale":   0.5,
+        "entropy_loss_scale": 0.005,   # match MAPPO: prevent premature entropy collapse
+        "value_loss_scale":   1.0,    # match MAPPO: correct for separate optimisers
 
-        "kl_threshold": 0,
+        "kl_threshold": 0.02,         # match MAPPO: safety valve against catastrophic policy change
 
         "rewards_shaper":       None,
         "time_limit_bootstrap": True,
 
         "weight_decay":       1e-4,
+        "linear_lr_decay":    True,   # match MAPPO: linear LR decay from initial_lr to 0
 
         # ---- MAGIC communication hyperparameters ----
         # (Niu et al. 2021, §4: Scheduler + Message Processor)
         "message_dim":        64,     # dimension of message vectors
         "num_comm_rounds":    2,      # L: number of communication rounds
         "num_heads":          4,      # heads in Message Processor GAT
-        "gumbel_temperature": 1.0,    # τ for Gumbel-Softmax in Scheduler
+        "gumbel_temperature": 0.5,    # τ for Gumbel-Softmax in Scheduler
     },
 
     "policy": {

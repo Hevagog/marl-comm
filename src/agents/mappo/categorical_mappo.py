@@ -10,9 +10,7 @@ from skrl import config
 from skrl.multi_agents.jax.base import MultiAgent
 from skrl.multi_agents.jax.mappo import MAPPO
 from skrl.multi_agents.jax.mappo.mappo import (
-    _compute_gae,
     _update_value,
-    compute_gae,
 )
 from skrl.resources.schedulers.jax import KLAdaptiveLR
 
@@ -28,6 +26,74 @@ def _categorical_entropy(logits: jax.Array) -> jax.Array:
     """
     log_probs = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
     return -(jax.nn.softmax(logits, axis=-1) * log_probs).sum(axis=-1)
+
+
+# ---------------------------------------------------------------------------
+# Custom GAE without buffer-level advantage normalisation.
+# skrl's _compute_gae normalises advantages at the buffer level.  We then
+# normalise within each mini-batch in _update_policy_fixed.  Applying both
+# flips the sign of ~2-5% of small advantages (a sample with buffer-norm
+# advantage +0.03 in a mini-batch with mean +0.05 becomes -0.02), injecting
+# gradient noise.  The MAPPO reference normalises once at buffer level only;
+# we choose to normalise at mini-batch level only, which is mathematically
+# sounder for stochastic mini-batch optimisation.
+# ---------------------------------------------------------------------------
+
+
+def _compute_gae_no_norm(
+    rewards: np.ndarray,
+    dones: np.ndarray,
+    values: np.ndarray,
+    next_values: np.ndarray,
+    discount_factor: float = 0.99,
+    lambda_coefficient: float = 0.95,
+) -> tuple[np.ndarray, np.ndarray]:
+    """GAE without buffer-level advantage normalisation (numpy fallback)."""
+    advantage = 0
+    advantages = np.zeros_like(rewards)
+    not_dones = np.logical_not(dones)
+    memory_size = rewards.shape[0]
+    for i in reversed(range(memory_size)):
+        _next_values = values[i + 1] if i < memory_size - 1 else next_values
+        advantage = (
+            rewards[i]
+            - values[i]
+            + discount_factor
+            * not_dones[i]
+            * (_next_values + lambda_coefficient * advantage)
+        )
+        advantages[i] = advantage
+    returns = advantages + values
+    # No normalisation here — done at mini-batch level in _update_policy_fixed
+    return returns, advantages
+
+
+@jax.jit
+def _jit_compute_gae_no_norm(
+    rewards: jax.Array,
+    dones: jax.Array,
+    values: jax.Array,
+    next_values: jax.Array,
+    discount_factor: float = 0.99,
+    lambda_coefficient: float = 0.95,
+) -> tuple[jax.Array, jax.Array]:
+    """GAE without buffer-level advantage normalisation (JIT version)."""
+    advantage = 0
+    advantages = jnp.zeros_like(rewards)
+    not_dones = jnp.logical_not(dones)
+    memory_size = rewards.shape[0]
+    for i in reversed(range(memory_size)):
+        _next_values = values[i + 1] if i < memory_size - 1 else next_values
+        advantage = (
+            rewards[i]
+            - values[i]
+            + discount_factor
+            * not_dones[i]
+            * (_next_values + lambda_coefficient * advantage)
+        )
+        advantages = advantages.at[i].set(advantage)
+    returns = advantages + values
+    return returns, advantages
 
 
 @functools.partial(
@@ -119,33 +185,51 @@ class CategoricalMAPPO(MAPPO):
             for i, uid in enumerate(self.possible_agents)
         }
 
-        weight_decay = self.cfg.get("weight_decay", 0.0)
-        if weight_decay > 0:
+        # Save initial learning rate for linear decay.
+        uid0 = self.possible_agents[0]
+        self._initial_learning_rate = float(self._learning_rate[uid0])
 
+        # share preprocessors across all agents.
+        # Only uid0's scalers are trained (via train=True), so all agents
+        # must reference the same scaler instances to get consistent
+        # preprocessing during both rollout (act/record_transition) and
+        # training (_update).
+        for uid in self.possible_agents:
+            self._state_preprocessor[uid] = self._state_preprocessor[uid0]
+            self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid0]
+            self._value_preprocessor[uid] = self._value_preprocessor[uid0]
+
+        # Create a SINGLE set of AdamW optimisers for the shared models.
+        # With parameter sharing, all agents' data is pooled and
+        # the shared model is updated once per rollout — a single optimiser
+        # maintains consistent Adam moment estimates.
+        weight_decay = self.cfg.get("weight_decay", 0.0)
+        policy = self.policies[uid0]
+        value = self.values[uid0]
+
+        if policy is not None and value is not None:
+            # Always use scale=False so we can pass the (potentially decayed)
+            # learning rate externally in each step() call.
+            shared_policy_opt = AdamW(
+                model=policy,
+                lr=self._learning_rate[uid0],
+                weight_decay=weight_decay,
+                grad_norm_clip=self._grad_norm_clip[uid0],
+                scale=False,
+            )
+            shared_value_opt = AdamW(
+                model=value,
+                lr=self._learning_rate[uid0],
+                weight_decay=weight_decay,
+                grad_norm_clip=self._grad_norm_clip[uid0],
+                scale=False,
+            )
+            # Point all per-agent optimizer slots to the single shared instance.
             for uid in self.possible_agents:
-                policy = self.policies[uid]
-                value = self.values[uid]
-                if policy is not None and value is not None:
-                    self.policy_optimizer[uid] = AdamW(
-                        model=policy,
-                        lr=self._learning_rate[uid],
-                        weight_decay=weight_decay,
-                        grad_norm_clip=self._grad_norm_clip[uid],
-                        scale=not self._learning_rate_scheduler[uid],
-                    )
-                    self.value_optimizer[uid] = AdamW(
-                        model=value,
-                        lr=self._learning_rate[uid],
-                        weight_decay=weight_decay,
-                        grad_norm_clip=self._grad_norm_clip[uid],
-                        scale=not self._learning_rate_scheduler[uid],
-                    )
-                    self.checkpoint_modules[uid]["policy_optimizer"] = (
-                        self.policy_optimizer[uid]
-                    )
-                    self.checkpoint_modules[uid]["value_optimizer"] = (
-                        self.value_optimizer[uid]
-                    )
+                self.policy_optimizer[uid] = shared_policy_opt
+                self.value_optimizer[uid] = shared_value_opt
+                self.checkpoint_modules[uid]["policy_optimizer"] = shared_policy_opt
+                self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
 
     @staticmethod
     def _append_agent_id(shared_states: jax.Array, one_hot: jax.Array) -> jax.Array:
@@ -153,7 +237,11 @@ class CategoricalMAPPO(MAPPO):
 
         ``one_hot`` has shape ``(1, num_agents)`` and is broadcast along the
         batch dimension of ``shared_states`` ``(B, state_dim)``.
+        Handles both 2-D ``(B, state_dim)`` and 3-D ``(B, 1, state_dim)``
+        inputs that skrl memory tensors may produce.
         """
+        if shared_states.ndim == 3 and shared_states.shape[1] == 1:
+            shared_states = shared_states[:, 0, :]
         batch = shared_states.shape[0]
         return jnp.concatenate(
             [shared_states, jnp.broadcast_to(one_hot, (batch, one_hot.shape[1]))],
@@ -211,9 +299,28 @@ class CategoricalMAPPO(MAPPO):
                     values = jax.device_get(values)
                 values = self._value_preprocessor[uid](values, inverse=True)
 
-                # time-limit (truncation) bootstrapping
+                # time-limit (truncation) bootstrapping: V(s_{t+1}), not V(s_t).
+                # The truncation reward augmentation must use the value of the
+                # *next* state to correctly approximate the discounted return
+                # beyond the time-limit boundary.
                 if self._time_limit_bootstrap[uid]:
-                    rewards[uid] += self._discount_factor[uid] * values * truncated[uid]
+                    next_preprocessed = self._shared_state_preprocessor[uid](
+                        infos["shared_next_states"]
+                    )
+                    next_expanded = self._append_agent_id(
+                        next_preprocessed, self._agent_onehot[uid]
+                    )
+                    next_values, _, _ = self.values[uid].act(
+                        {"states": next_expanded}, role="value"
+                    )
+                    if not self._jax:
+                        next_values = jax.device_get(next_values)
+                    next_values = self._value_preprocessor[uid](
+                        next_values, inverse=True
+                    )
+                    rewards[uid] += (
+                        self._discount_factor[uid] * next_values * truncated[uid]
+                    )
 
                 # storage transition in memory
                 self.memories[uid].add_samples(
@@ -228,17 +335,25 @@ class CategoricalMAPPO(MAPPO):
                     shared_states=shared_states,
                 )
 
-    def _update(self, timestep: int, timesteps: int) -> None:  # noqa: C901
-        """Copy of ``MAPPO._update`` except it calls
-        ``_update_policy_fixed`` instead of ``_update_policy``.
+    def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
+        """Create shuffled indices for one training epoch.
+
+        Default: random permutation of all samples.  MAGICMAPPO overrides
+        this to shuffle at the timestep level, preserving agent pairing
+        within each communication group.
         """
+        return np.random.permutation(buffer_size)
+
+    def _update(self, timestep: int, timesteps: int) -> None:  # noqa: C901
+        uid0 = self.possible_agents[0]
+        policy = self.policies[uid0]  # shared model
+        value = self.values[uid0]  # shared model
+
+        per_agent_tensors: dict[str, dict[str, jax.Array]] = {}
 
         for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
             memory = self.memories[uid]
 
-            # compute returns and advantages
             value.training = False
             bootstrap_shared = self._shared_state_preprocessor[uid](
                 self._current_shared_next_states
@@ -246,173 +361,179 @@ class CategoricalMAPPO(MAPPO):
             bootstrap_shared = self._append_agent_id(
                 bootstrap_shared, self._agent_onehot[uid]
             )
-            last_values, _, _ = value.act(
-                {"states": bootstrap_shared},
-                role="value",
-            )  # TODO: .float()
+            last_values, _, _ = value.act({"states": bootstrap_shared}, role="value")
             value.training = True
-            if not self._jax:  # numpy backend
+            if not self._jax:
                 last_values = jax.device_get(last_values)
             last_values = self._value_preprocessor[uid](last_values, inverse=True)
 
-            values = memory.get_tensor_by_name("values")
-            returns, advantages = (_compute_gae if self._jax else compute_gae)(
+            raw_values = memory.get_tensor_by_name("values")
+            returns, advantages = (
+                _jit_compute_gae_no_norm if self._jax else _compute_gae_no_norm
+            )(
                 rewards=memory.get_tensor_by_name("rewards"),
                 dones=memory.get_tensor_by_name("terminated")
                 | memory.get_tensor_by_name("truncated"),
-                values=values,
+                values=raw_values,
                 next_values=last_values,
                 discount_factor=self._discount_factor[uid],
                 lambda_coefficient=self._lambda[uid],
             )
 
             memory.set_tensor_by_name(
-                "values", self._value_preprocessor[uid](values, train=True)
+                "values", self._value_preprocessor[uid](raw_values, train=True)
             )
             memory.set_tensor_by_name(
                 "returns", self._value_preprocessor[uid](returns, train=True)
             )
             memory.set_tensor_by_name("advantages", advantages)
 
-            # sample mini-batches from memory
-            sampled_batches = memory.sample_all(
-                names=self._tensors_names, mini_batches=self._mini_batches[uid]
+            # Extract all named tensors from this agent's memory.
+            tensors = {}
+            for name in self._tensors_names:
+                t = memory.get_tensor_by_name(name)
+                tensors[name] = t.reshape(t.shape[0], t.shape[-1])
+            # Preprocess shared states and append agent-ID *before* pooling
+            # so each sample in the pooled buffer carries its agent identity.
+            tensors["shared_states"] = self._append_agent_id(
+                self._shared_state_preprocessor[uid](
+                    tensors["shared_states"], train=(uid == uid0)
+                ),
+                self._agent_onehot[uid],
             )
+            per_agent_tensors[uid] = tensors
 
-            cumulative_policy_loss = 0
-            cumulative_entropy_loss = 0
-            cumulative_value_loss = 0
+        pooled_list = [
+            jnp.concatenate(
+                [per_agent_tensors[uid][name] for uid in self.possible_agents],
+                axis=0,
+            )
+            for name in self._tensors_names
+        ]
+        buffer_size = pooled_list[0].shape[0]
+        batch_size = buffer_size // self._mini_batches[uid0]
 
-            # learning epochs
-            for epoch in range(self._learning_epochs[uid]):
-                kl_divergences = []
+        cumulative_policy_loss = 0.0
+        cumulative_entropy_loss = 0.0
+        cumulative_value_loss = 0.0
+        actual_batch_count = 0
 
-                # mini-batches loop
-                for (
-                    sampled_states,
+        kl_exceeded = False
+        for epoch in range(self._learning_epochs[uid0]):
+            if kl_exceeded:
+                break
+
+            # Reshuffle each epoch (MAPPO paper §5.1).
+            _indices = self._shuffle_buffer_indices(buffer_size)
+            sampled_batches = [
+                tuple(t[_indices[i : i + batch_size]] for t in pooled_list)
+                for i in range(0, buffer_size, batch_size)
+            ]
+
+            kl_divergences: list[float] = []
+
+            for (
+                sampled_states,
+                sampled_shared_states,
+                sampled_actions,
+                sampled_log_prob,
+                sampled_values,
+                sampled_returns,
+                sampled_advantages,
+            ) in sampled_batches:
+
+                # Individual-state preprocessing (train running stats only in
+                # epoch 0 to avoid updating with the same data 8×).
+                sampled_states = self._state_preprocessor[uid0](
+                    sampled_states, train=not epoch
+                )
+                # shared_states are already preprocessed + agent-ID appended
+                # during the pooling phase — no further processing needed.
+
+                # --- Policy update ---
+                grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
+                    _update_policy_fixed(
+                        policy.act,
+                        policy.state_dict,
+                        sampled_states,
+                        sampled_actions,
+                        sampled_log_prob,
+                        sampled_advantages,
+                        self._ratio_clip[uid0],
+                        self._entropy_loss_scale[uid0],
+                    )
+                )
+
+                kl_divergences.append(kl_divergence.item())
+
+                # KL early stopping — breaks BOTH loops (Bug 4 fix).
+                if (
+                    self._kl_threshold[uid0]
+                    and kl_divergence > self._kl_threshold[uid0]
+                ):
+                    kl_exceeded = True
+                    break
+
+                if config.jax.is_distributed:
+                    grad = policy.reduce_parameters(grad)
+                self.policy_optimizer[uid0] = self.policy_optimizer[uid0].step(
+                    grad, policy, self._learning_rate[uid0]
+                )
+                # Keep all per-agent slots pointing to the same updated opt.
+                for uid in self.possible_agents:
+                    self.policy_optimizer[uid] = self.policy_optimizer[uid0]
+
+                # --- Value update ---
+                grad, value_loss = _update_value(
+                    value.act,
+                    value.state_dict,
                     sampled_shared_states,
-                    sampled_actions,
-                    sampled_log_prob,
                     sampled_values,
                     sampled_returns,
-                    sampled_advantages,
-                ) in sampled_batches:
+                    self._value_loss_scale[uid0],
+                    self._clip_predicted_values[uid0],
+                    self._value_clip[uid0],
+                )
 
-                    sampled_states = self._state_preprocessor[uid](
-                        sampled_states, train=not epoch
-                    )
-                    sampled_shared_states = self._shared_state_preprocessor[uid](
-                        sampled_shared_states, train=not epoch
-                    )
-                    # Append one-hot agent ID to shared states (Change 8)
-                    sampled_shared_states = self._append_agent_id(
-                        sampled_shared_states, self._agent_onehot[uid]
-                    )
+                if config.jax.is_distributed:
+                    grad = value.reduce_parameters(grad)
+                self.value_optimizer[uid0] = self.value_optimizer[uid0].step(
+                    grad, value, self._learning_rate[uid0]
+                )
+                for uid in self.possible_agents:
+                    self.value_optimizer[uid] = self.value_optimizer[uid0]
 
-                    # compute policy loss
-                    grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
-                        _update_policy_fixed(
-                            policy.act,
-                            policy.state_dict,
-                            sampled_states,
-                            sampled_actions,
-                            sampled_log_prob,
-                            sampled_advantages,
-                            self._ratio_clip[uid],
-                            self._entropy_loss_scale[uid],
-                        )
-                    )
+                # Accumulate losses for logging.
+                cumulative_policy_loss += policy_loss.item()
+                cumulative_value_loss += value_loss.item()
+                if self._entropy_loss_scale[uid0]:
+                    cumulative_entropy_loss += entropy_loss.item()
+                actual_batch_count += 1
 
-                    kl_divergences.append(kl_divergence.item())
+        if self.cfg.get("linear_lr_decay", False) and timesteps > 0:
+            frac = max(1.0 - timestep / timesteps, 0.0)
+            new_lr = self._initial_learning_rate * frac
+            for uid in self.possible_agents:
+                self._learning_rate[uid] = new_lr
 
-                    # early stopping with KL divergence
-                    if (
-                        self._kl_threshold[uid]
-                        and kl_divergence > self._kl_threshold[uid]
-                    ):
-                        break
+        n_batches = max(actual_batch_count, 1)
 
-                    # optimization step (policy)
-                    if config.jax.is_distributed:
-                        grad = policy.reduce_parameters(grad)
-                    self.policy_optimizer[uid] = self.policy_optimizer[uid].step(
-                        grad,
-                        policy,
-                        (
-                            self._learning_rate[uid]
-                            if self._learning_rate_scheduler[uid]
-                            else None
-                        ),
-                    )
-
-                    # compute value loss
-                    grad, value_loss = _update_value(
-                        value.act,
-                        value.state_dict,
-                        sampled_shared_states,
-                        sampled_values,
-                        sampled_returns,
-                        self._value_loss_scale[uid],
-                        self._clip_predicted_values[uid],
-                        self._value_clip[uid],
-                    )
-
-                    # optimization step (value)
-                    if config.jax.is_distributed:
-                        grad = value.reduce_parameters(grad)
-                    self.value_optimizer[uid] = self.value_optimizer[uid].step(
-                        grad,
-                        value,
-                        (
-                            self._learning_rate[uid]
-                            if self._learning_rate_scheduler[uid]
-                            else None
-                        ),
-                    )
-
-                    # update cumulative losses
-                    cumulative_policy_loss += policy_loss.item()
-                    cumulative_value_loss += value_loss.item()
-                    if self._entropy_loss_scale[uid]:
-                        cumulative_entropy_loss += entropy_loss.item()
-
-                # update learning rate
-                if self._learning_rate_scheduler[uid]:
-                    if self._learning_rate_scheduler[uid] is KLAdaptiveLR:
-                        kl = np.mean(kl_divergences)
-                        # reduce (collect from all workers/processes) KL in distributed runs
-                        if config.jax.is_distributed:
-                            kl = jax.pmap(
-                                lambda x: jax.lax.psum(x, "i"), axis_name="i"
-                            )(kl.reshape(1)).item()
-                            kl /= config.jax.world_size
-                        self._learning_rate[uid] = self.schedulers[uid](
-                            timestep, self._learning_rate[uid], kl
-                        )
-                    else:
-                        self._learning_rate[uid] *= self.schedulers[uid](timestep)
-
-            # record data
+        for uid in self.possible_agents:
             self.track_data(
                 f"Loss / Policy loss ({uid})",
-                cumulative_policy_loss
-                / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                cumulative_policy_loss / n_batches,
             )
             self.track_data(
                 f"Loss / Value loss ({uid})",
-                cumulative_value_loss
-                / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                cumulative_value_loss / n_batches,
             )
-            if self._entropy_loss_scale:
+            if self._entropy_loss_scale[uid0]:
                 self.track_data(
                     f"Loss / Entropy loss ({uid})",
-                    cumulative_entropy_loss
-                    / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                    cumulative_entropy_loss / n_batches,
                 )
-
             self.track_data(f"Policy / Mean entropy ({uid})", mean_entropy.item())
-
-            if self._learning_rate_scheduler[uid]:
-                self.track_data(
-                    f"Learning / Learning rate ({uid})", self._learning_rate[uid]
-                )
+            self.track_data(
+                f"Learning / Learning rate ({uid})",
+                self._learning_rate[uid0],
+            )

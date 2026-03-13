@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from skrl.models.jax import CategoricalMixin, Model
+from skrl.models.jax.categorical import _categorical
 
 from agents.magic.models.comm_layers import MessageProcessor, Scheduler
 
@@ -23,13 +24,13 @@ class _CommunicateBlock(nn.Module):
     num_heads: int
 
     @nn.compact
-    def __call__(self, msg_group: jax.Array) -> jax.Array:
+    def __call__(self, msg_group: jax.Array, rng: jax.Array | None = None) -> jax.Array:
         adjs = Scheduler(
             hidden_dim=self.message_dim,
             num_rounds=self.num_comm_rounds,
             temperature=self.gumbel_temperature,
             name="scheduler",
-        )(msg_group, rng=None, hard=True)
+        )(msg_group, rng=rng, hard=True)
 
         processed = MessageProcessor(
             hidden_dim=self.message_dim,
@@ -100,9 +101,18 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         group of N consecutive rows represents one timestep's observations
         for all agents.
         """
-        x = inputs["states"]  # (B, obs_dim)
+        x = inputs["states"]  # (B, obs_dim) or (B, 1, obs_dim) from skrl memory
+        # skrl RandomMemory preserves the num_envs dimension when sampling,
+        # giving shape (batch, 1, obs_dim).  Squeeze it out so Dense layers
+        # and the communication reshape logic always work on 2-D tensors.
+        if x.ndim == 3:
+            x = x.squeeze(1)  # (B, 1, obs_dim) → (B, obs_dim)
         n = self.num_agents
         b = x.shape[0]
+
+        gumbel_rng = inputs.get("gumbel_rng", None)
+        if gumbel_rng is None:
+            gumbel_rng = jax.random.PRNGKey(0)
 
         #  Observation encoder  (MAGIC §4.1, Eq. 3 — FC part) ---
         obs_enc = nn.Dense(
@@ -119,7 +129,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="msg_encoder",
-        )(obs_enc)  # (B, message_dim)
+        )(
+            obs_enc
+        )  # (B, message_dim)
 
         # Reshape for communication: (B//N, N, message_dim) ---
         # If B is not divisible by N, fall back to no communication
@@ -127,7 +139,10 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             groups = b // n
             msg_grouped = messages.reshape(groups, n, self.message_dim)
 
-            # Vectorize communication over groups (shared params)
+            group_keys = jax.random.split(gumbel_rng, groups)
+
+            # Vectorize communication over groups (shared params).
+            # in_axes=0 vmaps both msg_group and rng along axis 0.
             VmappedComm = nn.vmap(
                 _CommunicateBlock,
                 variable_axes={"params": None},
@@ -141,7 +156,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(msg_grouped)  # (groups, N, message_dim)
+            )(
+                msg_grouped, group_keys
+            )  # (groups, N, message_dim)
             processed = processed.reshape(b, self.message_dim)
         else:
             # Fallback: no communication (single agent or misaligned batch)
@@ -203,9 +220,36 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         role: str = "",
         params: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, Union[jax.Array, None], Mapping[str, Union[jax.Array, Any]]]:
-        actions, log_prob, outputs = super().act(inputs, role, params)
-        # Store logits for entropy computation (same pattern as MAPPO)
-        outputs["stddev"] = outputs["net_output"]
+        """Override CategoricalMixin.act to inject Gumbel RNG.
+
+        Derives a separate PRNG key for Gumbel-Softmax noise and passes it
+        through the ``inputs`` dict so ``__call__`` can use it for stochastic
+        communication topology exploration.
+        """
+        with jax.default_device(self.device):
+            self._c_i += 1
+            subkey = jax.random.fold_in(self._c_key, self._c_i)
+            inputs["key"] = subkey
+            # Derive a separate key for Gumbel-Softmax topology exploration.
+            # Using a large offset avoids collision with the action-sampling key.
+            inputs["gumbel_rng"] = jax.random.fold_in(
+                self._c_key, self._c_i + 1_000_000_000
+            )
+
+        net_output, outputs = self.apply(
+            self.state_dict.params if params is None else params, inputs, role
+        )
+
+        actions, log_prob = _categorical(
+            net_output,
+            self._c_unnormalized_log_prob,
+            inputs.get("taken_actions", None),
+            subkey,
+        )
+
+        outputs["net_output"] = net_output
+        # Store logits as "stddev" for entropy computation (same pattern as MAPPO)
+        outputs["stddev"] = net_output
         return actions, log_prob, outputs
 
     @property

@@ -25,11 +25,12 @@ Observation (per agent, float32, 11 dims)
 - Red coin position (x, y, exists) normalized           3
 - Blue coin position (x, y, exists) normalized          3
 - Agent color indicator (1.0 = red/agent_0, 0.0 = blue) 1
-  Total                                                 11
+- Time (step count normalized to [0, 1])                1
+  Total                                                 12
 
-Actions (Discrete 5)
+Actions (Discrete 4)
 --------------------
-UP(0), DOWN(1), LEFT(2), RIGHT(3), STAY(4)
+UP(0), DOWN(1), LEFT(2), RIGHT(3)
 """
 
 from __future__ import annotations
@@ -46,14 +47,12 @@ _ACTION_UP = 0
 _ACTION_DOWN = 1
 _ACTION_LEFT = 2
 _ACTION_RIGHT = 3
-_ACTION_STAY = 4
 
 _DIRECTION_DELTAS: dict[int, Tuple[int, int]] = {
     _ACTION_UP: (0, -1),
     _ACTION_DOWN: (0, 1),
     _ACTION_LEFT: (-1, 0),
     _ACTION_RIGHT: (1, 0),
-    _ACTION_STAY: (0, 0),
 }
 
 
@@ -85,12 +84,12 @@ class CoinGameEnv:
         self._agent_names = [f"agent_{i}" for i in range(self._num_players)]
         self._possible_agents = list(self._agent_names)
 
-        self._num_actions = 5  # UP, DOWN, LEFT, RIGHT, STAY
+        self._num_actions = 4  # UP, DOWN, LEFT, RIGHT
         self._action_spaces = {
             a: spaces.Discrete(self._num_actions) for a in self._possible_agents
         }
 
-        self._obs_dim = 11
+        self._obs_dim = 12
         self._observation_spaces = {
             a: spaces.Box(low=0.0, high=1.0, shape=(self._obs_dim,), dtype=np.float32)
             for a in self._possible_agents
@@ -191,9 +190,7 @@ class CoinGameEnv:
         infos: Dict[str, dict] = {a: {} for a in self._agents}
         return obs, infos
 
-    def step(
-        self, actions: Mapping[str, int | np.integer]
-    ) -> Tuple[
+    def step(self, actions: Mapping[str, int | np.integer]) -> Tuple[
         Dict[str, np.ndarray],  # observation
         Dict[str, float],  # rewards
         Dict[str, bool],  # terminated
@@ -369,6 +366,7 @@ class CoinGameEnv:
         4-6    Red coin (x_norm, y_norm, exists)
         7-9    Blue coin (x_norm, y_norm, exists)
         10     Agent color indicator (1.0 for red/agent_0, 0.0 for blue/agent_1)
+        11     Time (step count normalized to [0, 1])
         """
         gs_norm = max(self._config.grid_size - 1, 1)
         obs: Dict[str, np.ndarray] = {}
@@ -403,6 +401,8 @@ class CoinGameEnv:
 
             # Agent color indicator: 1.0 for red (agent_0), 0.0 for blue (agent_1)
             features[10] = 1.0 if i == 0 else 0.0
+
+            features[11] = 1.0 - (self._step_count / self._config.max_cycles)
 
             obs[agent] = features
 

@@ -35,7 +35,11 @@ class MAGICValueNet(DeterministicMixin, Model):
         role: str = "",
     ):
         x = inputs["states"]
-        for i, h in enumerate(self.hidden_sizes):
+        # skrl RandomMemory samples include a num_envs=1 dimension;
+        # squeeze it out so Dense layers work on 2-D tensors.
+        if x.ndim == 3:
+            x = x.squeeze(1)
+        for h in self.hidden_sizes:
             x = nn.tanh(
                 nn.Dense(
                     int(h),
