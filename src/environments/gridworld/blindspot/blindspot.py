@@ -343,20 +343,22 @@ class BlindSpotEnv:
             return None
 
         if self._renderer is None:
-            from .rendering import BlindSpotRenderer
+            from ..rendering import GridworldRenderer
 
-            self._renderer = BlindSpotRenderer(
+            self._renderer = GridworldRenderer(
                 grid_size=self._config.grid_size,
                 render_mode=self._render_mode,
+                style="blindspot",
             )
 
         return self._renderer.render(
-            positions=dict(self._positions),
+            agent_positions=dict(self._positions),
             traps=list(self._traps),
             goal=self._goal,
             reached_goal=dict(self._reached_goal),
             step=self._step_count,
             max_steps=self._config.max_cycles,
+            vision_center=self._positions.get("agent_1"),
             vision_range=self._config.vision_range,
             messages=dict(self._messages) if self._use_comm else None,
         )

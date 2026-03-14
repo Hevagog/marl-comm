@@ -283,19 +283,19 @@ class CoinGameEnv:
             return None
 
         if self._renderer is None:
-            from .rendering import CoinGameRenderer
+            from ..rendering import GridworldRenderer
 
-            self._renderer = CoinGameRenderer(
+            self._renderer = GridworldRenderer(
                 grid_size=self._config.grid_size,
                 render_mode=self._render_mode,
                 cell_size=self._config.cell_size,
                 fps=self._config.fps,
+                style="coingame",
             )
 
         return self._renderer.render(
             agent_positions=dict(self._agent_positions),
-            red_coin_pos=self._red_coin_pos,
-            blue_coin_pos=self._blue_coin_pos,
+            coins={"red": self._red_coin_pos, "blue": self._blue_coin_pos},
             step=self._step_count,
             max_steps=self._config.max_cycles,
         )
