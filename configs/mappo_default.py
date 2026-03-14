@@ -1,9 +1,11 @@
 # fmt: off
+import jax.numpy as jnp
+
 from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mappo_coingame_v7",
+        "name":             "mappo_coingame_v8",
         "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
@@ -38,7 +40,7 @@ CONFIG = {
         "fps":             4,
     },
     "mappo": {
-        "rollouts":        2048,      # number of rollouts before updating
+        "rollouts":        4096,      # number of rollouts before updating
         "learning_epochs": 8,       # learning epochs per update
         "mini_batches":    4,       # mini-batches per learning epoch
 
@@ -64,28 +66,36 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale": 0.005,   # prevents premature entropy collapse in 4-action space
+        "entropy_loss_scale": 0.02,   # fallback when entropy_annealing is disabled
+        "entropy_annealing": True,
+        "entropy_loss_scale_start": 0.05,
+        "entropy_loss_scale_end": 0.01,
+        "debug_entropy_stats": False,
         "value_loss_scale":   1.0,    # 1.0 is correct for separate policy/value optimisers
 
-        "kl_threshold": 0.02,        # KL early stopping (Bug 4 fix) — safety valve against catastrophic policy change
+        "kl_threshold": 0.05,
+        "kl_warmup_fraction": 0.3,
+        "debug_kl_stats": False,
 
-        "rewards_shaper":       None,
+        "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -2.0, 1.0),
         "time_limit_bootstrap": True,
 
         "weight_decay":       1e-4,
-        "linear_lr_decay":    True,   # Bug 1 fix: linear LR decay from initial_lr to 0
+        "linear_lr_decay":    True,
+        "lr_decay_start_fraction": 0.3,   # NEW — hold full LR for first 30% of training
+        "min_lr_fraction":         0.1,
     },
 
     "policy": {
-        "hidden_sizes":          [128, 128],
+        "hidden_sizes":          [256, 256],
         "unnormalized_log_prob": True,
     },
 
     "value": {
-        "hidden_sizes": [128, 128],
+        "hidden_sizes": [256, 256],
     },
 
     "memory": {
-        "size": 2048,
+        "size": 4096,
     },
 }

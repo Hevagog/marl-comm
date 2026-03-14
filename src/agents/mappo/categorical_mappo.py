@@ -98,7 +98,7 @@ def _jit_compute_gae_no_norm(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("policy_act", "entropy_loss_scale"),
+    static_argnames=("policy_act", "entropy_loss_scale", "debug_entropy"),
 )
 def _update_policy_fixed(
     policy_act,
@@ -109,6 +109,7 @@ def _update_policy_fixed(
     sampled_advantages,
     ratio_clip,
     entropy_loss_scale,
+    debug_entropy,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
 
@@ -146,6 +147,8 @@ def _update_policy_fixed(
 
         logits = outputs["net_output"]
         entropy = _categorical_entropy(logits)
+        if debug_entropy:
+            jax.debug.print("entropy mean: {}", entropy.mean())
         entropy_loss = jnp.float32(0.0)
         if entropy_loss_scale:
             entropy_loss = -entropy_loss_scale * entropy.mean()
@@ -418,6 +421,20 @@ class CategoricalMAPPO(MAPPO):
         cumulative_value_loss = 0.0
         actual_batch_count = 0
 
+        effective_entropy_loss_scale = float(self._entropy_loss_scale[uid0])
+        if self.cfg.get("entropy_annealing", False) and timesteps > 0:
+            e_start = float(self.cfg.get("entropy_loss_scale_start", 0.05))
+            e_end = float(self.cfg.get("entropy_loss_scale_end", 0.005))
+            frac = max(0.0, 1.0 - timestep / timesteps)
+            effective_entropy_loss_scale = e_end + frac * (e_start - e_end)
+        for uid in self.possible_agents:
+            self._entropy_loss_scale[uid] = effective_entropy_loss_scale
+
+        kl_warmup_fraction = float(self.cfg.get("kl_warmup_fraction", 0.0))
+        apply_kl_stop = True
+        if timesteps > 0 and kl_warmup_fraction > 0.0:
+            apply_kl_stop = timestep > (timesteps * kl_warmup_fraction)
+
         kl_exceeded = False
         for epoch in range(self._learning_epochs[uid0]):
             if kl_exceeded:
@@ -460,7 +477,8 @@ class CategoricalMAPPO(MAPPO):
                         sampled_log_prob,
                         sampled_advantages,
                         self._ratio_clip[uid0],
-                        self._entropy_loss_scale[uid0],
+                        effective_entropy_loss_scale,
+                        self.cfg.get("debug_entropy_stats", False),
                     )
                 )
 
@@ -468,11 +486,29 @@ class CategoricalMAPPO(MAPPO):
 
                 # KL early stopping — breaks BOTH loops (Bug 4 fix).
                 if (
-                    self._kl_threshold[uid0]
+                    apply_kl_stop
+                    and self._kl_threshold[uid0]
                     and kl_divergence > self._kl_threshold[uid0]
                 ):
                     kl_exceeded = True
                     break
+
+                # Optional KL diagnostics.
+                if self.cfg.get("debug_kl_stats", False):
+                    self.track_data(
+                        "Diagnostics / Mean KL (shared)",
+                        kl_divergence.item(),
+                    )
+
+                if (
+                    self._kl_threshold[uid0]
+                    and not apply_kl_stop
+                    and self.cfg.get("debug_kl_stats", False)
+                ):
+                    self.track_data(
+                        "Diagnostics / KL stop skipped (warmup)",
+                        1.0,
+                    )
 
                 if config.jax.is_distributed:
                     grad = policy.reduce_parameters(grad)
@@ -506,13 +542,24 @@ class CategoricalMAPPO(MAPPO):
                 # Accumulate losses for logging.
                 cumulative_policy_loss += policy_loss.item()
                 cumulative_value_loss += value_loss.item()
-                if self._entropy_loss_scale[uid0]:
+                if effective_entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
                 actual_batch_count += 1
 
         if self.cfg.get("linear_lr_decay", False) and timesteps > 0:
-            frac = max(1.0 - timestep / timesteps, 0.0)
-            new_lr = self._initial_learning_rate * frac
+            delay_frac = float(self.cfg.get("lr_decay_start_fraction", 0.3))
+            min_lr_frac = float(self.cfg.get("min_lr_fraction", 0.1))
+
+            decay_start = timesteps * delay_frac
+            if timestep <= decay_start:
+                new_lr = self._initial_learning_rate  # hold constant
+            else:
+                # Linear decay over the remaining (1 - delay_frac) of training
+                remaining = timesteps - decay_start
+                elapsed_since_start = timestep - decay_start
+                frac = max(1.0 - elapsed_since_start / remaining, min_lr_frac)
+                new_lr = self._initial_learning_rate * frac
+
             for uid in self.possible_agents:
                 self._learning_rate[uid] = new_lr
 
@@ -527,7 +574,7 @@ class CategoricalMAPPO(MAPPO):
                 f"Loss / Value loss ({uid})",
                 cumulative_value_loss / n_batches,
             )
-            if self._entropy_loss_scale[uid0]:
+            if effective_entropy_loss_scale:
                 self.track_data(
                     f"Loss / Entropy loss ({uid})",
                     cumulative_entropy_loss / n_batches,
@@ -537,3 +584,10 @@ class CategoricalMAPPO(MAPPO):
                 f"Learning / Learning rate ({uid})",
                 self._learning_rate[uid0],
             )
+            self.track_data("Learning / Learning rate", float(new_lr))
+            self.track_data("Learning / Entropy scale", effective_entropy_loss_scale)
+            if kl_divergences:
+                self.track_data(
+                    f"Diagnostics / Mean KL (final, {uid})",
+                    sum(kl_divergences) / len(kl_divergences),
+                )

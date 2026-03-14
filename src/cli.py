@@ -7,8 +7,6 @@ from pathlib import Path
 from skrl.envs.wrappers.jax import wrap_env
 
 
-from environments import make_coin_game_env
-from environments.gridworld.coingame.config import CoinGameConfig
 from utils import load_config
 
 
@@ -37,7 +35,7 @@ def main() -> None:
         "--task",
         type=str,
         required=True,
-        choices=["train", "eval", "record"],
+        choices=["train", "eval", "record", "analyze"],
     )
     parser.add_argument(
         "--checkpoint",
@@ -58,13 +56,35 @@ def main() -> None:
     mode = "human" if args.task == "eval" else "rgb_array"
 
     env_cfg = cfg.get("env", {})
-    coin_config = CoinGameConfig(
-        grid_size=env_cfg.get("grid_size", 7),
-        max_cycles=env_cfg.get("max_cycles", 50),
-        pick_reward=env_cfg.get("pick_reward", 1.0),
-        steal_penalty=env_cfg.get("steal_penalty", -2.0),
-    )
-    raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
+    env_id = env_cfg.get("id", "coingame")
+
+    if env_id == "coingame":
+        from environments.gridworld.coingame.config import CoinGameConfig
+        from environments import make_coin_game_env
+
+        coin_config = CoinGameConfig(
+            grid_size=env_cfg.get("grid_size", 7),
+            max_cycles=env_cfg.get("max_cycles", 50),
+            pick_reward=env_cfg.get("pick_reward", 1.0),
+            steal_penalty=env_cfg.get("steal_penalty", -2.0),
+        )
+        raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
+    elif env_id == "blindspot":
+        from environments.gridworld.blindspot.config import BlindSpotConfig
+        from environments.gridworld.blindspot.blindspot import make_blind_spot_env
+
+        bs_config = BlindSpotConfig(
+            grid_size=env_cfg.get("grid_size", 9),
+            max_cycles=env_cfg.get("max_cycles", 100),
+            num_traps=env_cfg.get("num_traps", 5),
+            use_communication=env_cfg.get("use_communication", False),
+        )
+        raw_env = make_blind_spot_env(config=bs_config, render_mode=mode)
+    else:
+        raise ValueError(
+            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot']"
+        )
+
     env = wrap_env(raw_env, wrapper="pettingzoo")
 
     agent_type: str = cfg["experiment"].get("agent_type", "mappo")
@@ -78,6 +98,8 @@ def main() -> None:
         runner.eval(checkpoint_path=args.checkpoint)
     elif task == "record":
         runner.record(checkpoint_path=args.checkpoint)
+    elif task == "analyze":
+        runner.analyze(checkpoint_path=args.checkpoint)
     else:
         parser.error(f"Unknown task: {task}")
 

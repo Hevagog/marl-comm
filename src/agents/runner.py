@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from utils import EvalCollector, save_all_figures
 from skrl.trainers.jax import SequentialTrainer
 
 if TYPE_CHECKING:
@@ -92,6 +93,33 @@ class BaseRunner(ABC):
             print(f"Recording saved to {out_path}")
         else:
             print("Warning: no frames were captured (env.render() returned None).")
+
+    def analyze(
+        self,
+        checkpoint_path: str | None = None,
+        n_episodes: int = 30,
+        output_dir: str = "eval_plots",
+    ) -> None:
+
+        path = checkpoint_path or self._cfg.get("eval", {}).get("checkpoint_path")
+        if path:
+            self._load_checkpoint(path)
+
+        env_cfg = self._cfg.get("env", {})
+        collector = EvalCollector(
+            grid_size=env_cfg.get("grid_size", 7),
+            pick_reward=env_cfg.get("pick_reward", 1.0),
+            steal_penalty=env_cfg.get("steal_penalty", -2.0),
+        )
+
+        data = collector.collect(
+            env=self._env,
+            agent=self._agent,
+            n_episodes=n_episodes,
+        )
+
+        exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+        save_all_figures(data, output_dir=output_dir, prefix=exp_name)
 
     def _load_checkpoint(self, path: str) -> None:
         """Load agent checkpoint from *path*."""

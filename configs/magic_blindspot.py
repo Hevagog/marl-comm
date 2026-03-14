@@ -4,13 +4,13 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "magic_coingame_v4",
+        "name":             "magic_blindspot_v1",
         "agent_type":       "magic",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["magic", "coingame"],
+            "tags":    ["magic", "blindspot"],
         },
         "write_interval":      "auto",
         "checkpoint_interval": "auto",
@@ -18,11 +18,11 @@ CONFIG = {
     },
 
     "env": {
-        "id":            "coingame",
-        "grid_size":     5,
-        "max_cycles":    50,
-        "pick_reward":   1.0,
-        "steal_penalty": -2.0,
+        "id":            "blindspot",
+        "grid_size":     9,
+        "max_cycles":    100,
+        "num_traps":     5,
+        "use_communication": False, # Comm handled differentially by MAGIC, not env discrete messages
     },
 
     "training": {
@@ -55,9 +55,9 @@ CONFIG = {
         "learning_rate_scheduler_kwargs": {},
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 12},
+        "state_preprocessor_kwargs":         {"size": 25},
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 24},
+        "shared_state_preprocessor_kwargs":  {"size": 50},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -80,7 +80,7 @@ CONFIG = {
         "kl_warmup_fraction": 0.3,
         "debug_kl_stats":     False,
 
-        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -2.0, 1.0),
+        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 10.0),
 
         "time_limit_bootstrap": True,
 
@@ -89,7 +89,7 @@ CONFIG = {
         "lr_decay_start_fraction": 0.3,
         "min_lr_fraction":         0.1,
 
-        "message_dim":        64,     
+        "message_dim":        128,    # Important for coordinating on a 9x9 grid with multiple traps
         "num_comm_rounds":    2,      
         "num_heads":          4,      
         "gumbel_temperature": 0.5,    
