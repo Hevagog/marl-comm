@@ -541,17 +541,37 @@ class BlindSpotEnv:
             trap_slots (num_traps * 3) | own_reached (1) | partner_reached (1)
             [| partner_message_onehot (M) if use_communication]
 
-        Without communication: 25 dims (was 23 before Step 15).
+        Without communication: 25 dims.
         With communication (M=4): 29 dims.
 
         goal_proximity = [1 - |gx-x|/gs, 1 - |gy-y|/gs] — per-axis proximity
         to the goal cell.  Values in [0,1]: 1.0 at goal, 0.0 at farthest cell.
-        Added in Step 15 to fix encoder directional collapse.  The goal cell
-        gets the highest magnitude of these 2 dims, so after C ≈ mu_goal
-        (softmax-weighted init), C·mu_goal > C·mu_start (positive gradient).
 
-        Agent A (agent_0) sees all traps.
-        Agent B (agent_1) only sees traps within its vision range; out-of-range traps are masked to zeros.
+        Trap encoding (ego-relative + proximity-sorted):
+        -------------------------------------------------
+        Trap positions are encoded as RELATIVE offsets from the observing agent's
+        current position: (rel_x, rel_y) = (trap_x - own_x, trap_y - own_y) / gs.
+
+        Before filling the fixed-length trap slots, the visible traps are sorted
+        by their Manhattan distance to the observing agent (nearest first).
+        This gives the MLP two critical inductive biases:
+
+        1. **Translation invariance**: a trap one cell to the right is always
+           encoded as rel_x = +1/gs, regardless of where the agent currently is.
+           The network can learn "if slot_0_rel_x ≈ +1/gs and slot_0_rel_y ≈ 0
+           → avoid RIGHT" once, rather than having to memorise this rule for
+           every possible absolute coordinate.
+
+        2. **Permutation stability (slot ordering)**: slot_0 is always the
+           nearest trap.  Without sorting, the same physical cell appears in all
+           five slots across episodes (confirmed empirically: every grid cell is
+           equally likely to land in any slot index), forcing the network to
+           duplicate avoidance weights five-fold and making learning unstable.
+
+        Agent A (agent_0) sees all traps; Agent B (agent_1) only sees traps
+        within its vision range — out-of-range traps are masked to (0, 0, 0).
+        The sorting and relative encoding apply independently per agent using
+        only traps that agent can see.
         """
         gs = float(max(self._config.grid_size - 1, 1))  # for normalisation
         obs: Dict[str, np.ndarray] = {}
@@ -580,30 +600,33 @@ class BlindSpotEnv:
             features.append(1.0 - abs(gx - own_x) / gs)
             features.append(1.0 - abs(gy - own_y) / gs)
 
-            # Trap slots
+            #  Trap slots (ego-relative + proximity-sorted)
+            # Determine which traps this agent can see.
             is_full_vision = i == 0  # agent_0 has full vision
             vr = self._config.vision_range
 
+            visible_traps: list[tuple[int, int]] = []
+            for tx, ty in self._traps:
+                if is_full_vision or (abs(tx - own_x) <= vr and abs(ty - own_y) <= vr):
+                    visible_traps.append((tx, ty))
+
+            # Sort visible traps by Manhattan distance to this agent (nearest first).
+            # This creates a stable, consistent ordering: slot_0 is always the
+            # nearest threat, enabling the MLP to learn proximity-based avoidance
+            # with a single set of weights rather than five independent copies.
+            visible_traps.sort(key=lambda t: abs(t[0] - own_x) + abs(t[1] - own_y))
+
+            # Fill fixed-length trap slots with ego-relative coordinates.
             for t_idx in range(self._config.num_traps):
-                if t_idx < len(self._traps):
-                    tx, ty = self._traps[t_idx]
-                    if is_full_vision:
-                        # Agent A sees all traps
-                        features.append(tx / gs)
-                        features.append(ty / gs)
-                        features.append(1.0)
-                    else:
-                        # Agent B only sees traps within vision range
-                        if abs(tx - own_x) <= vr and abs(ty - own_y) <= vr:
-                            features.append(tx / gs)
-                            features.append(ty / gs)
-                            features.append(1.0)
-                        else:
-                            features.append(0.0)
-                            features.append(0.0)
-                            features.append(0.0)
+                if t_idx < len(visible_traps):
+                    tx, ty = visible_traps[t_idx]
+                    # Relative offset normalised by grid scale.
+                    # +1/gs = one step to the right / down; -1/gs = one step left / up.
+                    features.append((tx - own_x) / gs)
+                    features.append((ty - own_y) / gs)
+                    features.append(1.0)
                 else:
-                    # Unused trap slot (fewer traps than slots)
+                    # Unused trap slot (trap not visible or fewer traps than slots)
                     features.append(0.0)
                     features.append(0.0)
                     features.append(0.0)

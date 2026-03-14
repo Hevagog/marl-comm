@@ -33,9 +33,13 @@ class BlindSpotConfig:
 
     distance_shaping_scale: float = 0.5
     """Scale factor for distance-based shaping reward.  The raw potential
-    difference is in [-1/(grid_size-1), +1/(grid_size-1)]; this multiplier
-    controls how much the shaping reward contributes relative to the
-    step penalty and goal/trap rewards."""
+    difference Φ(s') - Φ(s) = -(new_dist - old_dist) / max_dist lies in
+    [-1/(2*(grid_size-1)), +1/(2*(grid_size-1))]; for grid_size=9 this is
+    [-1/16, +1/16] ≈ ±0.0625 per step.  This multiplier controls how much
+    the shaping reward contributes relative to the step penalty and
+    goal/trap rewards.  With scale=0.5 and trap_penalty=-5.0, a two-step
+    detour costs only ~0.08 in shaping loss — far less than a trap hit,
+    so the shaping does not override trap-avoidance incentives."""
 
     fixed_trap_seed: int | None = None
     """When set, traps are placed using this fixed seed every episode,
