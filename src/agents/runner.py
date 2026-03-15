@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from utils import EvalCollector, save_all_figures
 from skrl.trainers.jax import SequentialTrainer
 
 if TYPE_CHECKING:
@@ -100,26 +99,53 @@ class BaseRunner(ABC):
         n_episodes: int = 30,
         output_dir: str = "eval_plots",
     ) -> None:
-
         path = checkpoint_path or self._cfg.get("eval", {}).get("checkpoint_path")
         if path:
             self._load_checkpoint(path)
 
         env_cfg = self._cfg.get("env", {})
-        collector = EvalCollector(
-            grid_size=env_cfg.get("grid_size", 7),
-            pick_reward=env_cfg.get("pick_reward", 1.0),
-            steal_penalty=env_cfg.get("steal_penalty", -2.0),
-        )
+        env_id = env_cfg.get("id", "coingame")
 
-        data = collector.collect(
-            env=self._env,
-            agent=self._agent,
-            n_episodes=n_episodes,
-        )
+        if env_id == "blindspot":
+            from utils.blindspot_eval_analysis import BlindSpotEvalCollector
+            from utils.blindspot_eval_visualizer import save_all_blindspot_figures
 
-        exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-        save_all_figures(data, output_dir=output_dir, prefix=exp_name)
+            use_comm = env_cfg.get("use_communication", False)
+            num_tokens = env_cfg.get("num_message_tokens", 4)
+
+            collector = BlindSpotEvalCollector(
+                grid_size=env_cfg.get("grid_size", 9),
+                num_traps=env_cfg.get("num_traps", 5),
+                max_cycles=env_cfg.get("max_cycles", 100),
+                use_communication=use_comm,
+                num_message_tokens=num_tokens,
+            )
+
+            data = collector.collect(
+                env=self._env,
+                agent=self._agent,
+                n_episodes=n_episodes,
+            )
+
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_blindspot_figures(data, output_dir=output_dir, prefix=exp_name)
+        else:
+            from utils import EvalCollector, save_all_figures
+
+            collector = EvalCollector(
+                grid_size=env_cfg.get("grid_size", 7),
+                pick_reward=env_cfg.get("pick_reward", 1.0),
+                steal_penalty=env_cfg.get("steal_penalty", -2.0),
+            )
+
+            data = collector.collect(
+                env=self._env,
+                agent=self._agent,
+                n_episodes=n_episodes,
+            )
+
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_figures(data, output_dir=output_dir, prefix=exp_name)
 
     def _load_checkpoint(self, path: str) -> None:
         """Load agent checkpoint from *path*."""
