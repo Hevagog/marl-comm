@@ -6,7 +6,9 @@ import gymnasium
 import numpy as np
 
 from agents.mappo.models.policy import PolicyNet
+from agents.mappo.models.policy_memory import PolicyNetGRU
 from agents.mappo.models.value import ValueNet
+from agents.mappo.models.value_memory import ValueNetGRU
 
 
 def create_mappo_models(
@@ -45,18 +47,36 @@ def create_mappo_models(
         dtype=np.float32,
     )
 
-    shared_policy = PolicyNet(
-        observation_space=obs_space,
-        action_space=act_space,
-        hidden_sizes=hidden_sizes_policy,
-        unnormalized_log_prob=unnormalized_log_prob,
-    )
+    if cfg["policy"]["use_memory"]:
+        shared_policy = PolicyNetGRU(
+            observation_space=obs_space,
+            action_space=act_space,
+            hidden_sizes=hidden_sizes_policy,
+            rnn_features=cfg["policy"].get("rnn_features", 256),
+            unnormalized_log_prob=unnormalized_log_prob,
+        )
+    else:
+        shared_policy = PolicyNet(
+            observation_space=obs_space,
+            action_space=act_space,
+            hidden_sizes=hidden_sizes_policy,
+            unnormalized_log_prob=unnormalized_log_prob,
+        )
 
-    shared_value = ValueNet(
-        observation_space=expanded_shared_obs_space,
-        action_space=act_space,
-        hidden_sizes=hidden_sizes_value,
-    )
+    if cfg["value"]["use_memory"]:
+        shared_value = ValueNetGRU(
+            observation_space=expanded_shared_obs_space,
+            action_space=act_space,
+            hidden_sizes=hidden_sizes_policy,
+            rnn_features=cfg["value"].get("rnn_features", 256),
+        )
+
+    else:
+        shared_value = ValueNet(
+            observation_space=expanded_shared_obs_space,
+            action_space=act_space,
+            hidden_sizes=hidden_sizes_value,
+        )
 
     shared_policy.init_state_dict(role="policy")
     shared_value.init_state_dict(role="value")
