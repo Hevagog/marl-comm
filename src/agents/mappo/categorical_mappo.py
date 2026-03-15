@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import functools
+import pickle
 
+import flax.serialization
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -201,6 +203,15 @@ class CategoricalMAPPO(MAPPO):
             self._state_preprocessor[uid] = self._state_preprocessor[uid0]
             self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid0]
             self._value_preprocessor[uid] = self._value_preprocessor[uid0]
+            self.checkpoint_modules[uid]["state_preprocessor"] = (
+                self._state_preprocessor[uid0]
+            )
+            self.checkpoint_modules[uid]["shared_state_preprocessor"] = (
+                self._shared_state_preprocessor[uid0]
+            )
+            self.checkpoint_modules[uid]["value_preprocessor"] = (
+                self._value_preprocessor[uid0]
+            )
 
         # Create a SINGLE set of AdamW optimisers for the shared models.
         # With parameter sharing, all agents' data is pooled and
@@ -233,6 +244,50 @@ class CategoricalMAPPO(MAPPO):
                 self.value_optimizer[uid] = shared_value_opt
                 self.checkpoint_modules[uid]["policy_optimizer"] = shared_policy_opt
                 self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
+
+    def load(self, path: str) -> None:
+        """Load checkpoint, fixing skrl JAX multi-agent ``load()`` bug.
+
+        **ROOT-001 fix**: skrl 1.4.3 ``MultiAgent.load()`` (JAX backend)
+        checks ``hasattr(module, "load_state_dict")`` but no JAX module
+        defines that method (it's a PyTorch-ism).  The correct check is
+        ``hasattr(module, "state_dict")``, matching the single-agent
+        ``Agent.load()`` at ``agents/jax/base.py:444``.
+
+        Without this fix, ``load()`` silently restores nothing — the agent
+        operates with random-init weights and default preprocessor stats.
+        """
+        with open(path, "rb") as f:
+            modules = pickle.load(f)
+
+        if not isinstance(modules, dict):
+            print("Checkpoint is not a dict — skipping load.")
+            return
+
+        for uid in self.possible_agents:
+            if uid not in modules:
+                print(
+                    f"Cannot load modules for {uid}. "
+                    "The agent doesn't have such an instance"
+                )
+                continue
+            for name, data in modules[uid].items():
+                module = self.checkpoint_modules[uid].get(name, None)
+                if module is not None:
+                    # FIX ROOT-001: check "state_dict" (correct) instead of
+                    # "load_state_dict" (PyTorch-only, never present in JAX).
+                    if hasattr(module, "state_dict"):
+                        params = flax.serialization.from_bytes(
+                            module.state_dict.params, data
+                        )
+                        module.state_dict = module.state_dict.replace(params=params)
+                    else:
+                        print(f"Module {uid}:{name} has no state_dict — skipped.")
+                else:
+                    print(
+                        f"Cannot load the {uid}:{name} module. "
+                        "The agent doesn't have such an instance"
+                    )
 
     @staticmethod
     def _append_agent_id(shared_states: jax.Array, one_hot: jax.Array) -> jax.Array:
@@ -458,7 +513,6 @@ class CategoricalMAPPO(MAPPO):
                 sampled_returns,
                 sampled_advantages,
             ) in sampled_batches:
-
                 # Individual-state preprocessing (train running stats only in
                 # epoch 0 to avoid updating with the same data 8×).
                 sampled_states = self._state_preprocessor[uid0](

@@ -80,6 +80,12 @@ class PolicyNet(CategoricalMixin, Model):
         # get_entropy(outputs["stddev"]) computes the correct categorical
         # entropy inside _update_policy.
         outputs["stddev"] = outputs["net_output"]
+        # During training the
+        # stochastic ``actions`` are used; during evaluation the trainer
+        # selects ``mean_actions`` for cleaner behaviour.
+        outputs["mean_actions"] = jnp.argmax(
+            outputs["net_output"], axis=-1, keepdims=True
+        )
         return actions, log_prob, outputs
 
     @property
