@@ -61,9 +61,7 @@ class _CommunicateBlock(nn.Module):
             num_heads=self.num_heads,
             num_rounds=self.num_comm_rounds,
             name="msg_processor",
-        )(
-            msg_group, adjs
-        )  # (N, message_dim)
+        )(msg_group, adjs)  # (N, message_dim)
 
         return processed, adjs  # (N, msg_dim), (R, N, N)
 
@@ -83,6 +81,16 @@ class MAGICPolicyNet(CategoricalMixin, Model):
     The processed message is concatenated with the agent's encoded observation
     before the action head, giving the policy access to both local information
     and communicated information.
+
+    Heterogeneous-agent communication
+    ----------------------------------
+    When agents have different observation shapes, ``__call__`` can be invoked
+    with ``inputs["external_messages"]`` (shape ``(B, message_dim)``).  In
+    this mode the obs/msg encoders and the communication block are bypassed:
+    only the message decoder + action head are applied.  The caller (e.g.
+    ``MAGICMAPPO.act``) is responsible for collecting messages from all
+    agents, running the Scheduler+MessageProcessor externally (using the first
+    agent's communication block), and distributing the aggregated messages.
 
     Communication tensors forwarded to ``act()`` outputs
     ----------------------------------------------------
@@ -136,10 +144,22 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         Parameters
         ----------
         inputs["states"] : (B, obs_dim) or (B, 1, obs_dim)
-            B must be a multiple of ``num_agents`` for communication to activate.
+            B must be a multiple of ``num_agents`` for communication to
+            activate (in the standard homogeneous case).
         inputs["gumbel_rng"] : jax.Array, optional
             PRNG key for Gumbel-Softmax topology exploration.  Injected by
             ``act()``; falls back to a fixed seed during init.
+        inputs["external_messages"] : (B, message_dim), optional
+            Pre-aggregated messages from the shared communication block.
+            When present, the obs/message encoders and the communication block
+            are still used (obs_enc is always computed) but the message
+            encoder output is replaced by these external messages.  The comm
+            block is skipped entirely.  Used in the heterogeneous-agent path
+            where ``MAGICMAPPO.act`` orchestrates cross-agent communication.
+        inputs["encode_only"] : bool, optional
+            If True, only run the obs encoder + message encoder and return
+            (messages, {"obs_enc": obs_enc}).  Used by MAGICMAPPO.act to
+            collect per-agent messages before running the comm block.
 
         Returns
         -------
@@ -159,7 +179,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
 
         gumbel_rng = inputs.get("gumbel_rng", jax.random.PRNGKey(0))
 
-        # ── 1. Observation encoder ──────────────────────────────────────────
+        # Observation encoder
         obs_enc = nn.Dense(
             self.hidden_sizes[0],
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
@@ -168,31 +188,22 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         )(x)
         obs_enc = nn.tanh(obs_enc)  # (B, H)
 
-        # ── 2. Message encoder ──────────────────────────────────────────────
+        # Message encoder
         messages = nn.Dense(
             self.message_dim,
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="msg_encoder",
-        )(
-            obs_enc
-        )  # (B, message_dim)
+        )(obs_enc)  # (B, message_dim)
 
-        # ── 3 & 4. Scheduler + Message Processor (vmapped over groups) ──────
-        comm_active = (b >= n) and (b % n == 0)
-        R = self.num_comm_rounds
-        groups = b // n if comm_active else 1
-
-        if comm_active:
-            msg_grouped = messages.reshape(groups, n, self.message_dim)
-            # (groups, N, message_dim)
-
-            group_keys = jax.random.split(gumbel_rng, groups)
-
-            # vmap _CommunicateBlock over the groups axis.
-            # Returns (processed, adjs):
-            #   processed : (groups, N, message_dim)
-            #   adjs      : (groups, num_rounds, N, N)
+        # encode_only mode: return messages without running the comm block.
+        # Used in heterogeneous MAGIC act() to collect per-agent messages.
+        if inputs.get("encode_only", False):
+            # We still need to materialise the comm_block parameters so that
+            # Flax can initialise them on the first call.  Run a dummy path.
+            _dummy_msg = jnp.zeros((n, self.message_dim))
+            _dummy_key = jax.random.PRNGKey(0)
+            # Touch the comm_block parameters.
             VmappedComm = nn.vmap(
                 _CommunicateBlock,
                 variable_axes={"params": None},
@@ -200,41 +211,131 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 in_axes=0,
                 out_axes=0,
             )
-            processed_grouped, adjs_grouped = VmappedComm(
+            VmappedComm(
                 message_dim=self.message_dim,
-                num_comm_rounds=R,
+                num_comm_rounds=self.num_comm_rounds,
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(msg_grouped, group_keys)
-            # processed_grouped : (groups, N, message_dim)
-            # adjs_grouped      : (groups, num_rounds, N, N)
+            )(_dummy_msg[None, :, :], _dummy_key[None])
+            # Also touch msg_decoder and action_fc layers.
+            _dummy_proc = jnp.zeros((b, self.message_dim))
+            _dummy_dec = nn.Dense(
+                self.hidden_sizes[0],
+                kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                bias_init=nn.initializers.constant(0.0),
+                name="msg_decoder",
+            )(_dummy_proc)
+            _dummy_combined = jnp.concatenate([obs_enc, _dummy_dec], axis=-1)
+            _h = _dummy_combined
+            for i, size in enumerate(self.hidden_sizes):
+                _h = nn.Dense(
+                    int(size),
+                    kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                    bias_init=nn.initializers.constant(0.0),
+                    name=f"action_fc_{i}",
+                )(_h)
+            nn.Dense(
+                int(self.num_actions),
+                kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+                bias_init=nn.initializers.constant(0.0),
+                name="action_logits",
+            )(_h)
+            # Return the real message embeddings.
+            return messages, {"obs_enc": obs_enc}
 
-            # Reorder adjs to (num_rounds, groups, N, N) for the analysis layer,
-            # which expects adj_matrices[round_idx] → (groups, N, N).
-            # jnp.asarray guards against vmap returning a Python list when
-            # groups==1 and Scheduler returns a list (same root cause as the
-            # list->stack fix in _CommunicateBlock).
-            adj_matrices = jnp.transpose(jnp.asarray(adjs_grouped), (1, 0, 2, 3))
-            # (num_rounds, groups, N, N)
+        # Scheduler + Message Processor (vmapped over groups)
+        external_messages = inputs.get("external_messages", None)
+        R = self.num_comm_rounds
 
-            hard_adj = (adj_matrices[-1] > 0.5).astype(jnp.float32)
-            # (groups, N, N)
-
-            agg_messages = processed_grouped  # (groups, N, message_dim)
-            raw_msg = msg_grouped  # (groups, N, message_dim)
-
-            processed = processed_grouped.reshape(b, self.message_dim)
-            # (B, message_dim) — flattened back for the action head
+        if external_messages is not None:
+            # Heterogeneous path: use externally-computed aggregated messages.
+            # The comm block is still initialised below via a dummy run.
+            processed = external_messages  # (B, message_dim)
+            groups = b // n if (b >= n and b % n == 0) else 1
+            adj_matrices = jnp.zeros((R, groups, n, n))
+            hard_adj = jnp.zeros((groups, n, n))
+            # Reshape messages for output tensors
+            msg_b = min(b, n * groups)
+            raw_msg = (
+                messages[:msg_b].reshape(groups, -1, self.message_dim)
+                if msg_b >= n
+                else messages.reshape(1, b, self.message_dim)
+            )
+            agg_messages = (
+                processed.reshape(groups, -1, self.message_dim)
+                if msg_b >= n
+                else processed.reshape(1, b, self.message_dim)
+            )
+            # Touch comm_block params so they get initialised.
+            _dummy_msg = jnp.zeros((n, self.message_dim))
+            _dummy_key = jax.random.PRNGKey(0)
+            VmappedComm = nn.vmap(
+                _CommunicateBlock,
+                variable_axes={"params": None},
+                split_rngs={"params": False},
+                in_axes=0,
+                out_axes=0,
+            )
+            VmappedComm(
+                message_dim=self.message_dim,
+                num_comm_rounds=self.num_comm_rounds,
+                gumbel_temperature=self.gumbel_temperature,
+                num_heads=self.num_heads,
+                name="comm_block",
+            )(_dummy_msg[None, :, :], _dummy_key[None])
         else:
-            # No communication: fall back to identity pass-through.
-            processed = messages
-            adj_matrices = jnp.zeros((R, 1, n, n))
-            hard_adj = jnp.zeros((1, n, n))
-            raw_msg = messages.reshape(groups, n, self.message_dim)
-            agg_messages = messages.reshape(groups, n, self.message_dim)
+            comm_active = (b >= n) and (b % n == 0)
+            groups = b // n if comm_active else 1
 
-        # ── 5. Message decoder ──────────────────────────────────────────────
+            if comm_active:
+                msg_grouped = messages.reshape(groups, n, self.message_dim)
+                # (groups, N, message_dim)
+
+                group_keys = jax.random.split(gumbel_rng, groups)
+
+                # vmap _CommunicateBlock over the groups axis.
+                # Returns (processed, adjs):
+                #   processed : (groups, N, message_dim)
+                #   adjs      : (groups, num_rounds, N, N)
+                VmappedComm = nn.vmap(
+                    _CommunicateBlock,
+                    variable_axes={"params": None},
+                    split_rngs={"params": False},
+                    in_axes=0,
+                    out_axes=0,
+                )
+                processed_grouped, adjs_grouped = VmappedComm(
+                    message_dim=self.message_dim,
+                    num_comm_rounds=R,
+                    gumbel_temperature=self.gumbel_temperature,
+                    num_heads=self.num_heads,
+                    name="comm_block",
+                )(msg_grouped, group_keys)
+                # processed_grouped : (groups, N, message_dim)
+                # adjs_grouped      : (groups, num_rounds, N, N)
+
+                # Reorder adjs to (num_rounds, groups, N, N) for the analysis layer.
+                adj_matrices = jnp.transpose(jnp.asarray(adjs_grouped), (1, 0, 2, 3))
+                # (num_rounds, groups, N, N)
+
+                hard_adj = (adj_matrices[-1] > 0.5).astype(jnp.float32)
+                # (groups, N, N)
+
+                agg_messages = processed_grouped  # (groups, N, message_dim)
+                raw_msg = msg_grouped  # (groups, N, message_dim)
+
+                processed = processed_grouped.reshape(b, self.message_dim)
+                # (B, message_dim) — flattened back for the action head
+            else:
+                # No communication: fall back to identity pass-through.
+                processed = messages
+                adj_matrices = jnp.zeros((R, 1, n, n))
+                hard_adj = jnp.zeros((1, n, n))
+                raw_msg = messages.reshape(groups, n, self.message_dim)
+                agg_messages = messages.reshape(groups, n, self.message_dim)
+
+        # Message decoder
         msg_decoded = nn.Dense(
             self.hidden_sizes[0],
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
@@ -243,7 +344,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         )(processed)
         msg_decoded = nn.tanh(msg_decoded)  # (B, H)
 
-        # ── 6. Action head ──────────────────────────────────────────────────
+        # Action head
         combined = jnp.concatenate([obs_enc, msg_decoded], axis=-1)  # (B, 2H)
         h = combined
         for i, size in enumerate(self.hidden_sizes):
@@ -260,9 +361,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="action_logits",
-        )(
-            h
-        )  # (B, num_actions)
+        )(h)  # (B, num_actions)
 
         # Pack all communication tensors into the outputs dict so that
         # act() can forward them to callers (e.g. the analysis collector).
@@ -274,8 +373,6 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         }
 
         return logits, comm_outputs
-
-    # ── Initialisation helper ────────────────────────────────────────────────
 
     def init_state_dict(
         self,
@@ -296,8 +393,6 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 "gumbel_rng": jax.random.PRNGKey(0),
             }
         super().init_state_dict(role, inputs, key)
-
-    # ── act() ────────────────────────────────────────────────────────────────
 
     def act(
         self,
@@ -343,6 +438,96 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         # adj_matrices, hard_adj, messages, agg_messages are already in
         # `outputs` — populated by __call__ above.  Nothing more to add.
 
+        return actions, log_prob, outputs
+
+    def encode_messages(
+        self,
+        obs: jax.Array,
+        gumbel_rng: Optional[jax.Array] = None,
+        params: Optional[jax.Array] = None,
+    ) -> Tuple[jax.Array, jax.Array]:
+        """Encode observations to message embeddings without running the comm block.
+
+        Returns
+        -------
+        messages : (B, message_dim)
+        obs_enc : (B, hidden_sizes[0])
+        """
+        with jax.default_device(self.device):
+            self._c_i += 1
+            subkey = jax.random.fold_in(self._c_key, self._c_i)
+            gumbel_key = (
+                gumbel_rng
+                if gumbel_rng is not None
+                else jax.random.fold_in(self._c_key, self._c_i + 1_000_000_000)
+            )
+
+        inputs = {
+            "states": obs,
+            "key": subkey,
+            "gumbel_rng": gumbel_key,
+            "encode_only": True,
+        }
+        messages, extra = self.apply(
+            self.state_dict.params if params is None else params,
+            inputs,
+            "policy",
+        )
+        return messages, extra["obs_enc"]
+
+    def act_with_messages(
+        self,
+        obs: jax.Array,
+        agg_messages: jax.Array,
+        adj_matrices: jax.Array,
+        hard_adj: jax.Array,
+        raw_messages: jax.Array,
+        params: Optional[jax.Array] = None,
+    ) -> Tuple[jax.Array, jax.Array, dict]:
+        """Generate actions using pre-computed aggregated messages.
+
+        Parameters
+        ----------
+        obs : (B, obs_dim) — this agent's observations.
+        agg_messages : (B, message_dim) — output of the shared comm block.
+        adj_matrices, hard_adj, raw_messages : comm tensors for logging.
+
+        Returns
+        -------
+        actions, log_prob, outputs (same format as ``act``).
+        """
+        with jax.default_device(self.device):
+            self._c_i += 1
+            subkey = jax.random.fold_in(self._c_key, self._c_i)
+            gumbel_key = jax.random.fold_in(self._c_key, self._c_i + 1_000_000_000)
+
+        inputs = {
+            "states": obs,
+            "key": subkey,
+            "gumbel_rng": gumbel_key,
+            "external_messages": agg_messages,
+        }
+
+        net_output, outputs = self.apply(
+            self.state_dict.params if params is None else params,
+            inputs,
+            "policy",
+        )
+
+        # Override the placeholder comm tensors with the real ones from the
+        # shared comm block.
+        outputs["adj_matrices"] = adj_matrices
+        outputs["hard_adj"] = hard_adj
+        outputs["messages"] = raw_messages
+        outputs["net_output"] = net_output
+        outputs["stddev"] = net_output
+
+        actions, log_prob = _categorical(
+            net_output,
+            self._c_unnormalized_log_prob,
+            None,
+            subkey,
+        )
         return actions, log_prob, outputs
 
     @property

@@ -2,16 +2,30 @@ from __future__ import annotations
 
 from typing import Mapping, Union
 
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from agents.mappo import CategoricalMAPPO
+from agents.magic.models.policy import _CommunicateBlock
 
 
 _COMM_KEYS: frozenset[str] = frozenset(
     {"adj_matrices", "hard_adj", "messages", "agg_messages"}
 )
+
+
+def _extract_comm_block_params(policy_state_dict) -> dict:
+    """Extract the comm_block sub-parameters from a MAGICPolicyNet state_dict.
+
+    The comm_block lives under ``params["params"]["comm_block"]`` in the
+    Flax parameter tree (because ``MAGICPolicyNet`` is wrapped in
+    ``CategoricalMixin`` / ``Model`` which adds an outer ``params`` key,
+    and the ``nn.compact`` submodule is named ``"comm_block"``).
+    """
+    inner_params = policy_state_dict.params["params"]
+    return {"params": inner_params["comm_block"]}
 
 
 class MAGICMAPPO(CategoricalMAPPO):
@@ -20,15 +34,20 @@ class MAGICMAPPO(CategoricalMAPPO):
     Overrides two methods to enable correct communication during both
     rollout and training:
 
-    - ``act`` (Bug 12 fix): stacks all agents' observations into one
-      batch so the communication protocol activates (requires
-      ``batch_size >= num_agents`` and ``batch_size % num_agents == 0``).
+    - ``act``: ensures the MAGIC communication block is activated correctly.
+      **Homogeneous** agents: stacks all agents' observations into one batch
+      so the shared policy's internal comm block runs over the full agent
+      group.
+      **Heterogeneous** agents: calls each agent's message encoder
+      independently, stacks the fixed-size messages, runs the shared
+      communication block, then feeds aggregated messages back to each
+      agent's decoder + action head.
 
-    - ``_shuffle_buffer_indices`` (Bug 13 fix): shuffles at the
-      *timestep* level, keeping same-timestep agent observations
-      adjacent.  This preserves correct agent pairing when the policy's
-      ``__call__`` reshapes to ``(B // N, N, obs_dim)`` for the
-      communication protocol.
+    - ``_shuffle_buffer_indices``: for the **homogeneous** (shared-policy)
+      path, shuffles at the *timestep* level, keeping same-timestep agent
+      observations adjacent.  For the **heterogeneous** path, falls back to
+      the base class's random permutation since each agent's policy is
+      updated on its own data.
     """
 
     def act(
@@ -36,6 +55,15 @@ class MAGICMAPPO(CategoricalMAPPO):
         states: Mapping[str, Union[np.ndarray, jax.Array]],
         timestep: int,
         timesteps: int,
+    ) -> tuple:
+        if self._shared_policy:
+            return self._act_homogeneous(states)
+        else:
+            return self._act_heterogeneous(states)
+
+    def _act_homogeneous(
+        self,
+        states: Mapping[str, Union[np.ndarray, jax.Array]],
     ) -> tuple:
         """Stack all agents' observations and call the shared policy once.
 
@@ -101,16 +129,161 @@ class MAGICMAPPO(CategoricalMAPPO):
         self._current_log_prob = log_prob
         return actions, log_prob, outputs
 
-    def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
-        """Shuffle at the timestep level, preserving agent pairing.
+    def _act_heterogeneous(
+        self,
+        states: Mapping[str, Union[np.ndarray, jax.Array]],
+    ) -> tuple:
+        """Generate actions for heterogeneous agents with cross-agent communication.
 
-        The pooled buffer has layout::
+        Each agent has its own ``MAGICPolicyNet`` with a potentially different
+        observation dimension.  Communication still works because:
+
+        1. Each agent's message encoder maps obs → fixed-size ``message_dim``
+           embedding.  This is agent-specific (different obs_dim input) but
+           produces a uniform output.
+
+        2. Messages from all agents are stacked and passed through a shared
+           communication block (Scheduler + MessageProcessor from agent 0's
+           policy params).  This block operates purely in message space and
+           is independent of obs_dim.
+
+        3. Aggregated messages are distributed back to each agent's policy,
+           which uses them (via ``act_with_messages``) together with its own
+           obs encoding to produce actions.
+
+        This implements CTDE communication: local obs encoding is decentralised,
+        but message passing is centralised across all agents.
+        """
+        uid0 = self.possible_agents[0]
+        n = len(self.possible_agents)
+
+        # Encode messages per agent
+        # Each call runs the agent-specific obs_encoder + msg_encoder.
+        per_agent_messages: dict[str, jax.Array] = {}
+        per_agent_obs_enc: dict[str, jax.Array] = {}
+        for uid in self.possible_agents:
+            policy = self.policies[uid]
+            preprocessed_obs = self._state_preprocessor[uid](states[uid])
+            messages, obs_enc = policy.encode_messages(preprocessed_obs)
+            per_agent_messages[uid] = messages  # (num_envs, message_dim)
+            per_agent_obs_enc[uid] = obs_enc  # (num_envs, hidden_size)
+
+        # Stack messages and run shared comm block
+        # All messages are (num_envs, message_dim) — same dim regardless of
+        # obs_dim.  Stack to (num_envs, num_agents, message_dim) for the
+        # communication block.
+        num_envs = per_agent_messages[uid0].shape[0]
+        # Shape: (num_envs, num_agents, message_dim)
+        all_messages = jnp.stack(
+            [per_agent_messages[uid] for uid in self.possible_agents],
+            axis=1,
+        )
+
+        # Run the communication block using agent 0's comm_block parameters.
+        # The _CommunicateBlock takes (N, message_dim) per group and we vmap
+        # over groups (= num_envs here).
+        policy0 = self.policies[uid0]
+        comm_block_params = _extract_comm_block_params(policy0.state_dict)
+
+        # Generate a Gumbel RNG key for the comm block.
+        with jax.default_device(policy0.device):
+            policy0._c_i += 1
+            gumbel_rng = jax.random.fold_in(
+                policy0._c_key, policy0._c_i + 1_000_000_000
+            )
+
+        # vmap over groups (num_envs) — each group has N agents.
+        group_keys = jax.random.split(gumbel_rng, num_envs)
+
+        magic_cfg = (
+            getattr(self, "cfg", {}).get("magic", {}) if hasattr(self, "cfg") else {}
+        )
+        message_dim = int(per_agent_messages[uid0].shape[-1])
+        num_comm_rounds = int(magic_cfg.get("num_comm_rounds", policy0.num_comm_rounds))
+        gumbel_temperature = float(
+            magic_cfg.get("gumbel_temperature", policy0.gumbel_temperature)
+        )
+        num_heads = int(magic_cfg.get("num_heads", policy0.num_heads))
+
+        VmappedComm = nn.vmap(
+            _CommunicateBlock,
+            variable_axes={"params": None},
+            split_rngs={"params": False},
+            in_axes=0,
+            out_axes=0,
+        )
+        comm_module = VmappedComm(
+            message_dim=message_dim,
+            num_comm_rounds=num_comm_rounds,
+            gumbel_temperature=gumbel_temperature,
+            num_heads=num_heads,
+            name="comm_block",
+        )
+
+        # all_messages: (num_envs, N, message_dim) — already in the right shape.
+        # group_keys: (num_envs,) — one PRNG key per group.
+        processed_grouped, adjs_grouped = comm_module.apply(
+            comm_block_params,
+            all_messages,
+            group_keys,
+        )
+        # processed_grouped: (num_envs, N, message_dim)
+        # adjs_grouped: (num_envs, num_comm_rounds, N, N)
+
+        # Reorder adjs to (num_comm_rounds, num_envs, N, N) for consistency.
+        adj_matrices = jnp.transpose(jnp.asarray(adjs_grouped), (1, 0, 2, 3))
+        hard_adj = (adj_matrices[-1] > 0.5).astype(jnp.float32)
+        # raw messages: (num_envs, N, message_dim)
+        raw_messages = all_messages
+
+        # Distribute aggregated messages and generate actions
+        actions: dict[str, jax.Array] = {}
+        log_prob: dict[str, jax.Array] = {}
+        outputs: dict[str, dict] = {}
+
+        for i, uid in enumerate(self.possible_agents):
+            policy = self.policies[uid]
+            preprocessed_obs = self._state_preprocessor[uid](states[uid])
+
+            # Extract this agent's aggregated messages: (num_envs, message_dim)
+            agent_agg_messages = processed_grouped[:, i, :]
+
+            agent_actions, agent_log_prob, agent_outputs = policy.act_with_messages(
+                obs=preprocessed_obs,
+                agg_messages=agent_agg_messages,
+                adj_matrices=adj_matrices,
+                hard_adj=hard_adj,
+                raw_messages=raw_messages,
+            )
+
+            actions[uid] = agent_actions
+            log_prob[uid] = agent_log_prob
+            # Override comm tensors to be the shared ones (same for all agents).
+            agent_outputs["adj_matrices"] = adj_matrices
+            agent_outputs["hard_adj"] = hard_adj
+            agent_outputs["messages"] = raw_messages
+            agent_outputs["agg_messages"] = processed_grouped
+            outputs[uid] = agent_outputs
+
+        if not self._jax:
+            actions = {uid: jax.device_get(a) for uid, a in actions.items()}
+            log_prob = {uid: jax.device_get(lp) for uid, lp in log_prob.items()}
+
+        self._current_log_prob = log_prob
+        return actions, log_prob, outputs
+
+    def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
+        """Shuffle indices for one training epoch.
+
+        **Homogeneous** (shared policy): shuffles at the *timestep* level,
+        keeping same-timestep agent observations adjacent.  The pooled
+        buffer has layout::
 
             [agent_0_t0, agent_0_t1, ..., agent_1_t0, agent_1_t1, ...]
 
-        where each agent block has ``M = buffer_size // num_agents``
-        rows.  Row ``t`` in agent_0's block and row ``t`` in agent_1's
-        block correspond to the *same* environment timestep.
+        where each agent block has ``M = buffer_size // num_agents`` rows.
+        Row ``t`` in agent_0's block and row ``t`` in agent_1's block
+        correspond to the *same* environment timestep.
 
         We create an interleaved permutation::
 
@@ -119,7 +292,16 @@ class MAGICMAPPO(CategoricalMAPPO):
         so consecutive groups of ``N`` rows are from the same timestep.
         The policy's ``__call__`` reshapes to ``(B // N, N, obs_dim)``
         and each group is a valid communication graph.
+
+        **Heterogeneous** (per-agent policies): each agent's policy is
+        updated on its own data independently, so there is no need to
+        preserve agent pairing.  Falls back to a plain random permutation.
         """
+        if not self._shared_policy:
+            # Heterogeneous: no agent-pairing constraint.
+            return np.random.permutation(buffer_size)
+
+        # Homogeneous: timestep-level shuffle preserving agent groups.
         n = len(self.possible_agents)
         M = buffer_size // n  # timesteps per agent
 

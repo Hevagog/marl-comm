@@ -14,7 +14,6 @@ from skrl.multi_agents.jax.mappo import MAPPO
 from skrl.multi_agents.jax.mappo.mappo import (
     _update_value,
 )
-from skrl.resources.schedulers.jax import KLAdaptiveLR
 
 from agents.mappo.adamw import AdamW
 
@@ -167,6 +166,14 @@ def _update_policy_fixed(
     return grad, policy_loss, entropy_loss, kl_divergence, mean_entropy
 
 
+def _is_shared_policy(models) -> bool:
+    agents = list(models.keys())
+    if len(agents) <= 1:
+        return True
+    first_policy = models[agents[0]].get("policy")
+    return all(models[uid].get("policy") is first_policy for uid in agents[1:])
+
+
 class CategoricalMAPPO(MAPPO):
     """MAPPO variant that correctly applies entropy regularisation for
     categorical (discrete-action) policies.
@@ -176,10 +183,18 @@ class CategoricalMAPPO(MAPPO):
     - Mini-batch advantage normalisation (MAPPO paper §5.1)
     - Agent-ID one-hot appended to shared states for the value function
       (MAPPO paper §5.2 — allows the shared critic to distinguish agents)
+    - Support for heterogeneous observation spaces: when agents have different
+      observation sizes, per-agent policy networks are used instead of
+      parameter sharing.  The shared critic always remains shared.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        # Detect whether a single shared policy is used across all agents,
+        # or each agent has its own separate policy network.
+        self._shared_policy: bool = _is_shared_policy(self.models)
+
         # Build a one-hot LUT: agent uid → one-hot vector (num_agents,).
         n = len(self.possible_agents)
         self._agent_onehot = {
@@ -214,20 +229,38 @@ class CategoricalMAPPO(MAPPO):
         # With parameter sharing, all agents' data is pooled and
         # the shared model is updated once per rollout — a single optimiser
         # maintains consistent Adam moment estimates.
+
+        # With heterogeneous agents (per-agent policies), each agent gets its
+        # own separate optimizer.
         weight_decay = self.cfg.get("weight_decay", 0.0)
-        policy = self.policies[uid0]
         value = self.values[uid0]
 
-        if policy is not None and value is not None:
-            # Always use scale=False so we can pass the (potentially decayed)
-            # learning rate externally in each step() call.
-            shared_policy_opt = AdamW(
-                model=policy,
-                lr=self._learning_rate[uid0],
-                weight_decay=weight_decay,
-                grad_norm_clip=self._grad_norm_clip[uid0],
-                scale=False,
-            )
+        if self._shared_policy:
+            # Homogeneous: one shared policy optimizer for all agents.
+            policy = self.policies[uid0]
+            if policy is not None and value is not None:
+                shared_policy_opt = AdamW(
+                    model=policy,
+                    lr=self._learning_rate[uid0],
+                    weight_decay=weight_decay,
+                    grad_norm_clip=self._grad_norm_clip[uid0],
+                    scale=False,
+                )
+                shared_value_opt = AdamW(
+                    model=value,
+                    lr=self._learning_rate[uid0],
+                    weight_decay=weight_decay,
+                    grad_norm_clip=self._grad_norm_clip[uid0],
+                    scale=False,
+                )
+                # Point all per-agent optimizer slots to the shared instances.
+                for uid in self.possible_agents:
+                    self.policy_optimizer[uid] = shared_policy_opt
+                    self.value_optimizer[uid] = shared_value_opt
+                    self.checkpoint_modules[uid]["policy_optimizer"] = shared_policy_opt
+                    self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
+        else:
+            # Heterogeneous: per-agent policy optimizer; shared value optimizer.
             shared_value_opt = AdamW(
                 model=value,
                 lr=self._learning_rate[uid0],
@@ -235,12 +268,22 @@ class CategoricalMAPPO(MAPPO):
                 grad_norm_clip=self._grad_norm_clip[uid0],
                 scale=False,
             )
-            # Point all per-agent optimizer slots to the single shared instance.
             for uid in self.possible_agents:
-                self.policy_optimizer[uid] = shared_policy_opt
-                self.value_optimizer[uid] = shared_value_opt
-                self.checkpoint_modules[uid]["policy_optimizer"] = shared_policy_opt
-                self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
+                policy = self.policies[uid]
+                if policy is not None and value is not None:
+                    per_agent_policy_opt = AdamW(
+                        model=policy,
+                        lr=self._learning_rate[uid],
+                        weight_decay=weight_decay,
+                        grad_norm_clip=self._grad_norm_clip[uid],
+                        scale=False,
+                    )
+                    self.policy_optimizer[uid] = per_agent_policy_opt
+                    self.value_optimizer[uid] = shared_value_opt
+                    self.checkpoint_modules[uid]["policy_optimizer"] = (
+                        per_agent_policy_opt
+                    )
+                    self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
 
     def load(self, path: str) -> None:
         """Load checkpoint, fixing skrl JAX multi-agent ``load()`` bug.
@@ -401,9 +444,9 @@ class CategoricalMAPPO(MAPPO):
 
     def _update(self, timestep: int, timesteps: int) -> None:  # noqa: C901
         uid0 = self.possible_agents[0]
-        policy = self.policies[uid0]  # shared model
-        value = self.values[uid0]  # shared model
+        value = self.values[uid0]  # always shared value
 
+        # Per-agent GAE and preprocessing
         per_agent_tensors: dict[str, dict[str, jax.Array]] = {}
 
         for uid in self.possible_agents:
@@ -462,21 +505,7 @@ class CategoricalMAPPO(MAPPO):
             )
             per_agent_tensors[uid] = tensors
 
-        pooled_list = [
-            jnp.concatenate(
-                [per_agent_tensors[uid][name] for uid in self.possible_agents],
-                axis=0,
-            )
-            for name in self._tensors_names
-        ]
-        buffer_size = pooled_list[0].shape[0]
-        batch_size = buffer_size // self._mini_batches[uid0]
-
-        cumulative_policy_loss = 0.0
-        cumulative_entropy_loss = 0.0
-        cumulative_value_loss = 0.0
-        actual_batch_count = 0
-
+        #  Entropy annealing
         effective_entropy_loss_scale = float(self._entropy_loss_scale[uid0])
         if self.cfg.get("entropy_annealing", False) and timesteps > 0:
             e_start = float(self.cfg.get("entropy_loss_scale_start", 0.05))
@@ -491,12 +520,74 @@ class CategoricalMAPPO(MAPPO):
         if timesteps > 0 and kl_warmup_fraction > 0.0:
             apply_kl_stop = timestep > (timesteps * kl_warmup_fraction)
 
+        #  Mini-batch training
+        if self._shared_policy:
+            # Homogeneous path: pool all agents' data and update a single
+            # shared policy.  This is the standard MAPPO parameter-sharing
+            # approach (Yu et al. 2021, §5).
+            self._update_shared_policy(
+                per_agent_tensors,
+                uid0,
+                value,
+                effective_entropy_loss_scale,
+                apply_kl_stop,
+                timestep,
+                timesteps,
+            )
+        else:
+            # Heterogeneous path: update each agent's policy independently
+            # on its own data.  The value network is still updated jointly
+            # (pooled) since it uses the shared global state.
+            self._update_per_agent_policies(
+                per_agent_tensors,
+                uid0,
+                value,
+                effective_entropy_loss_scale,
+                apply_kl_stop,
+                timestep,
+                timesteps,
+            )
+
+    def _update_shared_policy(
+        self,
+        per_agent_tensors,
+        uid0,
+        value,
+        effective_entropy_loss_scale,
+        apply_kl_stop,
+        timestep,
+        timesteps,
+    ) -> None:  # noqa: C901
+        """Training update for homogeneous agents (shared policy network).
+
+        All agents' transitions are pooled into a single buffer and the
+        shared policy + shared value are updated jointly, exactly as in
+        the MAPPO paper (Yu et al. 2021, §5).
+        """
+        policy = self.policies[uid0]
+
+        pooled_list = [
+            jnp.concatenate(
+                [per_agent_tensors[uid][name] for uid in self.possible_agents],
+                axis=0,
+            )
+            for name in self._tensors_names
+        ]
+        buffer_size = pooled_list[0].shape[0]
+        batch_size = buffer_size // self._mini_batches[uid0]
+
+        cumulative_policy_loss = 0.0
+        cumulative_entropy_loss = 0.0
+        cumulative_value_loss = 0.0
+        actual_batch_count = 0
         kl_exceeded = False
+        mean_entropy = jnp.float32(0.0)
+        new_lr = self._learning_rate[uid0]
+
         for epoch in range(self._learning_epochs[uid0]):
             if kl_exceeded:
                 break
 
-            # Reshuffle each epoch (MAPPO paper §5.1).
             _indices = self._shuffle_buffer_indices(buffer_size)
             sampled_batches = [
                 tuple(t[_indices[i : i + batch_size]] for t in pooled_list)
@@ -514,14 +605,6 @@ class CategoricalMAPPO(MAPPO):
                 sampled_returns,
                 sampled_advantages,
             ) in sampled_batches:
-                # Individual-state preprocessing (train running stats only in
-                # epoch 0 to avoid updating with the same data 8×).
-                # sampled_states = self._state_preprocessor[uid0](
-                #     sampled_states, train=not epoch
-                # )
-                # shared_states are already preprocessed + agent-ID appended
-                # during the pooling phase — no further processing needed.
-
                 # --- Policy update ---
                 grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
                     _update_policy_fixed(
@@ -539,7 +622,6 @@ class CategoricalMAPPO(MAPPO):
 
                 kl_divergences.append(kl_divergence.item())
 
-                # KL early stopping — breaks BOTH loops (Bug 4 fix).
                 if (
                     apply_kl_stop
                     and self._kl_threshold[uid0]
@@ -548,21 +630,10 @@ class CategoricalMAPPO(MAPPO):
                     kl_exceeded = True
                     break
 
-                # Optional KL diagnostics.
                 if self.cfg.get("debug_kl_stats", False):
                     self.track_data(
                         "Diagnostics / Mean KL (shared)",
                         kl_divergence.item(),
-                    )
-
-                if (
-                    self._kl_threshold[uid0]
-                    and not apply_kl_stop
-                    and self.cfg.get("debug_kl_stats", False)
-                ):
-                    self.track_data(
-                        "Diagnostics / KL stop skipped (warmup)",
-                        1.0,
                     )
 
                 if config.jax.is_distributed:
@@ -570,7 +641,6 @@ class CategoricalMAPPO(MAPPO):
                 self.policy_optimizer[uid0] = self.policy_optimizer[uid0].step(
                     grad, policy, self._learning_rate[uid0]
                 )
-                # Keep all per-agent slots pointing to the same updated opt.
                 for uid in self.possible_agents:
                     self.policy_optimizer[uid] = self.policy_optimizer[uid0]
 
@@ -594,12 +664,176 @@ class CategoricalMAPPO(MAPPO):
                 for uid in self.possible_agents:
                     self.value_optimizer[uid] = self.value_optimizer[uid0]
 
-                # Accumulate losses for logging.
                 cumulative_policy_loss += policy_loss.item()
                 cumulative_value_loss += value_loss.item()
                 if effective_entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
                 actual_batch_count += 1
+
+        new_lr = self._apply_lr_decay(timestep, timesteps)
+        self._log_training_stats(
+            uid0,
+            actual_batch_count,
+            cumulative_policy_loss,
+            cumulative_value_loss,
+            cumulative_entropy_loss,
+            effective_entropy_loss_scale,
+            mean_entropy,
+            new_lr,
+            per_agent_tensors,
+        )
+
+    def _update_per_agent_policies(
+        self,
+        per_agent_tensors,
+        uid0,
+        value,
+        effective_entropy_loss_scale,
+        apply_kl_stop,
+        timestep,
+        timesteps,
+    ) -> None:  # noqa: C901
+        """Training update for heterogeneous agents (per-agent policy networks).
+
+        Each agent's policy is updated on its own rollout data independently.
+        The value network (shared critic) is updated using the pooled shared
+        states from all agents — the value target is the same global-state-
+        conditioned V(s) regardless of which agent's local obs differs.
+
+        This follows the CTDE (Centralized Training, Decentralized Execution)
+        paradigm: each agent has its own actor, but a single centralized
+        critic is trained on the global state.
+        """
+        #  Value update data: pool shared states from all agents
+        all_shared_states = jnp.concatenate(
+            [per_agent_tensors[uid]["shared_states"] for uid in self.possible_agents],
+            axis=0,
+        )
+        all_values = jnp.concatenate(
+            [per_agent_tensors[uid]["values"] for uid in self.possible_agents], axis=0
+        )
+        all_returns = jnp.concatenate(
+            [per_agent_tensors[uid]["returns"] for uid in self.possible_agents], axis=0
+        )
+
+        per_agent_buffer_size = per_agent_tensors[uid0]["states"].shape[0]
+        pooled_buffer_size = all_shared_states.shape[0]
+        value_batch_size = max(pooled_buffer_size // self._mini_batches[uid0], 1)
+
+        cumulative_policy_loss = 0.0
+        cumulative_entropy_loss = 0.0
+        cumulative_value_loss = 0.0
+        actual_batch_count = 0
+        mean_entropy = jnp.float32(0.0)
+        new_lr = self._learning_rate[uid0]
+
+        kl_exceeded = False
+        for epoch in range(self._learning_epochs[uid0]):
+            if kl_exceeded:
+                break
+
+            # Per-agent policy updates (each on its own data)
+            for uid in self.possible_agents:
+                policy = self.policies[uid]
+                tensors = per_agent_tensors[uid]
+                buf_size = tensors["states"].shape[0]
+                batch_size = max(buf_size // self._mini_batches[uid], 1)
+
+                uid_indices = self._shuffle_buffer_indices(buf_size)
+
+                kl_divergences: list[float] = []
+
+                for i in range(0, buf_size, batch_size):
+                    idx = uid_indices[i : i + batch_size]
+                    sampled_states = tensors["states"][idx]
+                    sampled_actions = tensors["actions"][idx]
+                    sampled_log_prob = tensors["log_prob"][idx]
+                    sampled_advantages = tensors["advantages"][idx]
+
+                    grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
+                        _update_policy_fixed(
+                            policy.act,
+                            policy.state_dict,
+                            sampled_states,
+                            sampled_actions,
+                            sampled_log_prob,
+                            sampled_advantages,
+                            self._ratio_clip[uid],
+                            effective_entropy_loss_scale,
+                            self.cfg.get("debug_entropy_stats", False),
+                        )
+                    )
+
+                    kl_divergences.append(kl_divergence.item())
+
+                    if (
+                        apply_kl_stop
+                        and self._kl_threshold[uid]
+                        and kl_divergence > self._kl_threshold[uid]
+                    ):
+                        kl_exceeded = True
+                        break
+
+                    if config.jax.is_distributed:
+                        grad = policy.reduce_parameters(grad)
+                    self.policy_optimizer[uid] = self.policy_optimizer[uid].step(
+                        grad, policy, self._learning_rate[uid]
+                    )
+
+                    cumulative_policy_loss += policy_loss.item()
+                    if effective_entropy_loss_scale:
+                        cumulative_entropy_loss += entropy_loss.item()
+                    actual_batch_count += 1
+
+                if kl_exceeded:
+                    break
+
+            if kl_exceeded:
+                break
+
+            # Shared value update on pooled data from all agents
+            value_indices = np.random.permutation(pooled_buffer_size)
+            for i in range(0, pooled_buffer_size, value_batch_size):
+                idx = value_indices[i : i + value_batch_size]
+                grad, value_loss = _update_value(
+                    value.act,
+                    value.state_dict,
+                    all_shared_states[idx],
+                    all_values[idx],
+                    all_returns[idx],
+                    self._value_loss_scale[uid0],
+                    self._clip_predicted_values[uid0],
+                    self._value_clip[uid0],
+                )
+
+                if config.jax.is_distributed:
+                    grad = value.reduce_parameters(grad)
+                self.value_optimizer[uid0] = self.value_optimizer[uid0].step(
+                    grad, value, self._learning_rate[uid0]
+                )
+                # Sync all value optimiser slots
+                for uid in self.possible_agents:
+                    self.value_optimizer[uid] = self.value_optimizer[uid0]
+
+                cumulative_value_loss += value_loss.item()
+
+        new_lr = self._apply_lr_decay(timestep, timesteps)
+        self._log_training_stats(
+            uid0,
+            actual_batch_count,
+            cumulative_policy_loss,
+            cumulative_value_loss,
+            cumulative_entropy_loss,
+            effective_entropy_loss_scale,
+            mean_entropy,
+            new_lr,
+            per_agent_tensors,
+        )
+
+    def _apply_lr_decay(self, timestep: int, timesteps: int) -> float:
+        """Apply linear learning-rate decay and return the new LR."""
+        uid0 = self.possible_agents[0]
+        new_lr = float(self._learning_rate[uid0])
 
         if self.cfg.get("linear_lr_decay", False) and timesteps > 0:
             delay_frac = float(self.cfg.get("lr_decay_start_fraction", 0.3))
@@ -607,9 +841,8 @@ class CategoricalMAPPO(MAPPO):
 
             decay_start = timesteps * delay_frac
             if timestep <= decay_start:
-                new_lr = self._initial_learning_rate  # hold constant
+                new_lr = self._initial_learning_rate
             else:
-                # Linear decay over the remaining (1 - delay_frac) of training
                 remaining = timesteps - decay_start
                 elapsed_since_start = timestep - decay_start
                 frac = max(1.0 - elapsed_since_start / remaining, min_lr_frac)
@@ -618,7 +851,25 @@ class CategoricalMAPPO(MAPPO):
             for uid in self.possible_agents:
                 self._learning_rate[uid] = new_lr
 
+        return new_lr
+
+    def _log_training_stats(
+        self,
+        uid0,
+        actual_batch_count,
+        cumulative_policy_loss,
+        cumulative_value_loss,
+        cumulative_entropy_loss,
+        effective_entropy_loss_scale,
+        mean_entropy,
+        new_lr,
+        per_agent_tensors,
+    ) -> None:
+        """Log training statistics to the experiment tracker."""
         n_batches = max(actual_batch_count, 1)
+
+        # Compute KL divergences per-agent for logging
+        kl_divergences_all: list[float] = []
 
         for uid in self.possible_agents:
             self.track_data(
@@ -639,10 +890,5 @@ class CategoricalMAPPO(MAPPO):
                 f"Learning / Learning rate ({uid})",
                 self._learning_rate[uid0],
             )
-            self.track_data("Learning / Learning rate", float(new_lr))
-            self.track_data("Learning / Entropy scale", effective_entropy_loss_scale)
-            if kl_divergences:
-                self.track_data(
-                    f"Diagnostics / Mean KL (final, {uid})",
-                    sum(kl_divergences) / len(kl_divergences),
-                )
+        self.track_data("Learning / Learning rate", float(new_lr))
+        self.track_data("Learning / Entropy scale", effective_entropy_loss_scale)
