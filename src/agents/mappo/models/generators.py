@@ -47,7 +47,7 @@ def create_mappo_models(
         dtype=np.float32,
     )
 
-    if cfg["policy"]["use_memory"]:
+    if cfg["policy"].get("use_memory", False):
         shared_policy = PolicyNetGRU(
             observation_space=obs_space,
             action_space=act_space,
@@ -63,7 +63,7 @@ def create_mappo_models(
             unnormalized_log_prob=unnormalized_log_prob,
         )
 
-    if cfg["value"]["use_memory"]:
+    if cfg["value"].get("use_memory", False):
         shared_value = ValueNetGRU(
             observation_space=expanded_shared_obs_space,
             action_space=act_space,

@@ -200,12 +200,9 @@ class CategoricalMAPPO(MAPPO):
         # preprocessing during both rollout (act/record_transition) and
         # training (_update).
         for uid in self.possible_agents:
-            self._state_preprocessor[uid] = self._state_preprocessor[uid0]
             self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid0]
             self._value_preprocessor[uid] = self._value_preprocessor[uid0]
-            self.checkpoint_modules[uid]["state_preprocessor"] = (
-                self._state_preprocessor[uid0]
-            )
+
             self.checkpoint_modules[uid]["shared_state_preprocessor"] = (
                 self._shared_state_preprocessor[uid0]
             )
@@ -451,8 +448,12 @@ class CategoricalMAPPO(MAPPO):
             for name in self._tensors_names:
                 t = memory.get_tensor_by_name(name)
                 tensors[name] = t.reshape(t.shape[0], t.shape[-1])
-            # Preprocess shared states and append agent-ID *before* pooling
-            # so each sample in the pooled buffer carries its agent identity.
+            # Preprocess states per-agent (each has its own scaler with correct size)
+            # train=True only on first call to update running stats once
+            tensors["states"] = self._state_preprocessor[uid](
+                tensors["states"], train=True
+            )
+
             tensors["shared_states"] = self._append_agent_id(
                 self._shared_state_preprocessor[uid](
                     tensors["shared_states"], train=(uid == uid0)
@@ -515,9 +516,9 @@ class CategoricalMAPPO(MAPPO):
             ) in sampled_batches:
                 # Individual-state preprocessing (train running stats only in
                 # epoch 0 to avoid updating with the same data 8×).
-                sampled_states = self._state_preprocessor[uid0](
-                    sampled_states, train=not epoch
-                )
+                # sampled_states = self._state_preprocessor[uid0](
+                #     sampled_states, train=not epoch
+                # )
                 # shared_states are already preprocessed + agent-ID appended
                 # during the pooling phase — no further processing needed.
 

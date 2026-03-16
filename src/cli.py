@@ -80,9 +80,14 @@ def main() -> None:
             use_communication=env_cfg.get("use_communication", False),
         )
         raw_env = make_blind_spot_env(config=bs_config, render_mode=mode)
+    elif env_id == "simple_adversary":
+        from pettingzoo.mpe import simple_adversary_v3
+
+        raw_env = simple_adversary_v3.parallel_env(render_mode=mode)
+
     else:
         raise ValueError(
-            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot']"
+            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary']"
         )
 
     env = wrap_env(raw_env, wrapper="pettingzoo")

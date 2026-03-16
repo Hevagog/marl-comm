@@ -110,6 +110,13 @@ class BaseRunner(ABC):
             from utils.blindspot_eval_analysis import BlindSpotEvalCollector
             from utils.blindspot_eval_visualizer import save_all_blindspot_figures
 
+            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
+                from utils.magic_runner_integration import run_magic_analysis
+
+                run_magic_analysis(
+                    self, checkpoint_path, n_episodes, output_dir=f"{output_dir}/magic"
+                )
+
             use_comm = env_cfg.get("use_communication", False)
             num_tokens = env_cfg.get("num_message_tokens", 4)
 

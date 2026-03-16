@@ -9,6 +9,11 @@ import numpy as np
 from agents.mappo import CategoricalMAPPO
 
 
+_COMM_KEYS: frozenset[str] = frozenset(
+    {"adj_matrices", "hard_adj", "messages", "agg_messages"}
+)
+
+
 class MAGICMAPPO(CategoricalMAPPO):
     """MAPPO variant with MAGIC communication protocol.
 
@@ -42,6 +47,12 @@ class MAGICMAPPO(CategoricalMAPPO):
         By concatenating observations from all agents we get
         ``batch_size = num_agents``, allowing the communication graph
         (Scheduler + Message Processor) to operate correctly.
+
+        Communication output tensors (``adj_matrices``, ``hard_adj``,
+        ``messages``, ``agg_messages``) describe the **shared graph** for
+        the whole agent group.  They are passed through unsliced to every
+        agent's outputs dict so the analysis collector can read them from
+        any agent's slot without losing shape information.
         """
         uid0 = self.possible_agents[0]
         policy = self.policies[uid0]
@@ -72,10 +83,16 @@ class MAGICMAPPO(CategoricalMAPPO):
             s = slice(i * num_envs, (i + 1) * num_envs)
             actions[uid] = actions_all[s]
             log_prob[uid] = log_prob_all[s]
-            outputs[uid] = {
-                k: v[s] if isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)) else v
-                for k, v in outputs_all.items()
-            }
+            outputs[uid] = {}
+            for k, v in outputs_all.items():
+                if k in _COMM_KEYS:
+                    # Comm tensors are shared — pass through unsliced so
+                    # their shape is preserved for the analysis collector.
+                    outputs[uid][k] = v
+                elif isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)):
+                    outputs[uid][k] = v[s]
+                else:
+                    outputs[uid][k] = v
 
         if not self._jax:
             actions = {uid: jax.device_get(a) for uid, a in actions.items()}
