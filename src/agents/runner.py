@@ -136,6 +136,24 @@ class BaseRunner(ABC):
 
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_blindspot_figures(data, output_dir=output_dir, prefix=exp_name)
+        elif env_id == "simple_adversary":
+            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
+                from utils.magic_runner_integration import run_magic_analysis
+                run_magic_analysis(
+                    self, checkpoint_path, n_episodes, output_dir=f"{output_dir}/magic_sa"
+                )
+
+            from utils import SimpleAdversaryEvalCollector, save_all_sa_figures
+            sa_collector = SimpleAdversaryEvalCollector()
+
+            sa_data = sa_collector.collect(
+                env=self._env,
+                agent=self._agent,
+                n_episodes=n_episodes,
+            )
+
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_sa_figures(sa_data, output_dir=output_dir, prefix=exp_name)
         else:
             from utils import EvalCollector, save_all_figures
 

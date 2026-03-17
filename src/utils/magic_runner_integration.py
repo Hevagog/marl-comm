@@ -132,6 +132,30 @@ def run_magic_analysis(
     env_cfg = cfg.get("env", {})
     magic_cfg = cfg.get("magic", {})
     exp_name = cfg.get("experiment", {}).get("name", "magic_experiment")
+    env_id = env_cfg.get("id", "coingame")
+
+    if env_id == "simple_adversary":
+        from utils.magic_sa_comm_analysis import MAGICSASCommCollector
+        from utils.magic_sa_comm_visualizer import save_all_magic_sa_figures
+
+        collector_sa = MAGICSASCommCollector(
+            num_comm_rounds=magic_cfg.get("num_comm_rounds", 2),
+            message_dim=magic_cfg.get("message_dim", 128),
+        )
+
+        print(f"\n[MAGIC SA Analysis] Collecting {n_episodes} episodes …")
+        data_sa = collector_sa.collect(
+            env=runner._env,
+            agent=runner._agent,
+            n_episodes=n_episodes,
+        )
+
+        save_all_magic_sa_figures(
+            data_sa,
+            output_dir=output_dir,
+            prefix=exp_name,
+        )
+        return
 
     collector = MAGICCommCollector(
         grid_size=env_cfg.get("grid_size", 9),

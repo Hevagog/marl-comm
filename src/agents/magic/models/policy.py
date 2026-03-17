@@ -61,7 +61,9 @@ class _CommunicateBlock(nn.Module):
             num_heads=self.num_heads,
             num_rounds=self.num_comm_rounds,
             name="msg_processor",
-        )(msg_group, adjs)  # (N, message_dim)
+        )(
+            msg_group, adjs
+        )  # (N, message_dim)
 
         return processed, adjs  # (N, msg_dim), (R, N, N)
 
@@ -156,9 +158,10 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             encoder output is replaced by these external messages.  The comm
             block is skipped entirely.  Used in the heterogeneous-agent path
             where ``MAGICMAPPO.act`` orchestrates cross-agent communication.
-        inputs["encode_only"] : bool, optional
-            If True, only run the obs encoder + message encoder and return
-            (messages, {"obs_enc": obs_enc}).  Used by MAGICMAPPO.act to
+        role == "encode_only" : special mode
+            When ``role`` is set to ``"encode_only"``, only run the obs
+            encoder + message encoder and return
+            ``(messages, {"obs_enc": obs_enc})``. Used by MAGICMAPPO.act to
             collect per-agent messages before running the comm block.
 
         Returns
@@ -194,11 +197,15 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="msg_encoder",
-        )(obs_enc)  # (B, message_dim)
+        )(
+            obs_enc
+        )  # (B, message_dim)
 
         # encode_only mode: return messages without running the comm block.
+        # IMPORTANT: key off `role` (a static Python string), not an entry in
+        # `inputs`, to avoid boolean conversion of traced arrays under JIT.
         # Used in heterogeneous MAGIC act() to collect per-agent messages.
-        if inputs.get("encode_only", False):
+        if role == "encode_only":
             # We still need to materialise the comm_block parameters so that
             # Flax can initialise them on the first call.  Run a dummy path.
             _dummy_msg = jnp.zeros((n, self.message_dim))
@@ -332,8 +339,8 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 processed = messages
                 adj_matrices = jnp.zeros((R, 1, n, n))
                 hard_adj = jnp.zeros((1, n, n))
-                raw_msg = messages.reshape(groups, n, self.message_dim)
-                agg_messages = messages.reshape(groups, n, self.message_dim)
+                raw_msg = messages.reshape(1, b, self.message_dim)
+                agg_messages = messages.reshape(1, b, self.message_dim)
 
         # Message decoder
         msg_decoded = nn.Dense(
@@ -361,7 +368,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="action_logits",
-        )(h)  # (B, num_actions)
+        )(
+            h
+        )  # (B, num_actions)
 
         # Pack all communication tensors into the outputs dict so that
         # act() can forward them to callers (e.g. the analysis collector).
@@ -466,12 +475,11 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             "states": obs,
             "key": subkey,
             "gumbel_rng": gumbel_key,
-            "encode_only": True,
         }
         messages, extra = self.apply(
             self.state_dict.params if params is None else params,
             inputs,
-            "policy",
+            "encode_only",
         )
         return messages, extra["obs_enc"]
 

@@ -1,16 +1,17 @@
 # fmt: off
 import jax.numpy as jnp
+
 from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mappo_blindspot_comm_v4",
+        "name":             "mappo_sa_v0",
         "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["mappo", "blindspot", "communication"],
+            "tags":    ["mappo", "simple_adversary"],
         },
         "write_interval":      "auto",
         "checkpoint_interval": "auto",
@@ -18,32 +19,24 @@ CONFIG = {
     },
 
     "env": {
-        "id":            "blindspot",
-        "grid_size":     9,
-        "max_cycles":    100,
-        "num_traps":     5,
-        "use_communication": True,   
+        "id":            "simple_adversary",
     },
-    
     "training": {
         "timesteps": 8_000_000,
         "seed":      42,
     },
-    
     "eval": {
         "timesteps":       5_000,
         "checkpoint_path": None,
     },
-    
     "record": {
         "timesteps":       1_000,
         "checkpoint_path": None,
         "video_dir":       "recordings",
         "fps":             4,
     },
-    
     "mappo": {
-        "rollouts":        4096,      # number of rollouts before updating
+        "rollouts":        400,      # number of rollouts before updating
         "learning_epochs": 8,       # learning epochs per update
         "mini_batches":    4,       # mini-batches per learning epoch
 
@@ -55,11 +48,15 @@ CONFIG = {
         "learning_rate_scheduler_kwargs": {},
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 29}, # 2 + 2 + 2 + 2 + 15 + 1 + 1  + 4 message tokens = 29
+        "state_preprocessor_kwargs": {
+            "adversary_0": {"size": 8},
+            "agent_0": {"size": 10},
+            "agent_1": {"size": 10},
+        },
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 58}, # 29 * 2 = 58
+        "shared_state_preprocessor_kwargs": {"size": 28},
         "value_preprocessor":               RunningStandardScaler,
-        "value_preprocessor_kwargs":        {"size": 1},
+        "value_preprocessor_kwargs": {"size": 1},
 
         "random_timesteps": 0,
         "learning_starts":  0,
@@ -69,39 +66,36 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale": 0.02,
+        "entropy_loss_scale": 0.02,   # fallback when entropy_annealing is disabled
         "entropy_annealing": True,
-        "entropy_loss_scale_start": 0.05,
-        "entropy_loss_scale_end": 0.01,
+        "entropy_loss_scale_start": 0.015,
+        "entropy_loss_scale_end": 0.005,
         "debug_entropy_stats": False,
-        "value_loss_scale":   1.0,
+        "value_loss_scale":   1.0,    # 1.0 is correct for separate policy/value optimisers
 
         "kl_threshold": 0.05,
         "kl_warmup_fraction": 0.3,
         "debug_kl_stats": False,
 
-        # Clipping reward appropriately
-        "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -5.0, 10.0),
+        "rewards_shaper":       None,
         "time_limit_bootstrap": True,
 
         "weight_decay":       1e-4,
         "linear_lr_decay":    True,
-        "lr_decay_start_fraction": 0.3,
+        "lr_decay_start_fraction": 0.3,   # NEW — hold full LR for first 30% of training
         "min_lr_fraction":         0.1,
     },
 
     "policy": {
         "hidden_sizes":          [256, 256],
         "unnormalized_log_prob": True,
-        "use_memory": False,
     },
 
     "value": {
         "hidden_sizes": [256, 256],
-        "use_memory": False, 
     },
 
     "memory": {
-        "size": 4096,
+        "size": 400,
     },
 }

@@ -83,7 +83,13 @@ def main() -> None:
     elif env_id == "simple_adversary":
         from pettingzoo.mpe import simple_adversary_v3
 
-        raw_env = simple_adversary_v3.parallel_env(render_mode=mode)
+        raw_env = simple_adversary_v3.parallel_env(
+            N=env_cfg.get("N", env_cfg.get("num_good_agents", 2)),
+            max_cycles=env_cfg.get("max_cycles", 25),
+            continuous_actions=env_cfg.get("continuous_actions", False),
+            dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
+            render_mode=mode,
+        )
 
     else:
         raise ValueError(
