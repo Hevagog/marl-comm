@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from typing import Mapping, Union
 
 import flax.linen as nn
@@ -9,6 +10,7 @@ import numpy as np
 
 from agents.mappo import CategoricalMAPPO
 from agents.magic.models.policy import _CommunicateBlock
+from skrl.models.jax.categorical import _categorical
 
 
 _COMM_KEYS: frozenset[str] = frozenset(
@@ -26,6 +28,36 @@ def _extract_comm_block_params(policy_state_dict) -> dict:
     """
     inner_params = policy_state_dict.params["params"]
     return {"params": inner_params["comm_block"]}
+
+
+@functools.partial(jax.jit, static_argnames=("apply_fn",))
+def _jit_encode_messages(apply_fn, params, obs, gumbel_key, subkey):
+    """JIT'd version of MAGICPolicyNet.apply in encode_only mode."""
+    inputs = {
+        "states": obs,
+        "key": subkey,
+        "gumbel_rng": gumbel_key,
+    }
+    messages, extra = apply_fn(params, inputs, "encode_only")
+    return messages, extra["obs_enc"]
+
+
+@functools.partial(jax.jit, static_argnames=("apply_fn", "unnormalized_log_prob"))
+def _jit_act_with_messages(
+    apply_fn, unnormalized_log_prob, params, obs, agg_messages, gumbel_key, subkey
+):
+    """JIT'd version of MAGICPolicyNet.apply + _categorical for act_with_messages."""
+    inputs = {
+        "states": obs,
+        "key": subkey,
+        "gumbel_rng": gumbel_key,
+        "external_messages": agg_messages,
+    }
+    net_output, outputs = apply_fn(params, inputs, "policy")
+    actions, log_prob = _categorical(net_output, unnormalized_log_prob, None, subkey)
+    outputs["net_output"] = net_output
+    outputs["stddev"] = net_output
+    return actions, log_prob, outputs
 
 
 class MAGICMAPPO(CategoricalMAPPO):
@@ -49,6 +81,13 @@ class MAGICMAPPO(CategoricalMAPPO):
       the base class's random permutation since each agent's policy is
       updated on its own data.
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Lazy-initialised cache for the heterogeneous comm block.
+        # Avoids recreating nn.vmap(_CommunicateBlock) every step.
+        self._cached_comm_module: nn.Module | None = None
+        self._jit_comm_apply = None
 
     def act(
         self,
@@ -157,14 +196,26 @@ class MAGICMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         n = len(self.possible_agents)
 
-        # Encode messages per agent
+        # Encode messages per agent (JIT'd)
         # Each call runs the agent-specific obs_encoder + msg_encoder.
         per_agent_messages: dict[str, jax.Array] = {}
         per_agent_obs_enc: dict[str, jax.Array] = {}
         for uid in self.possible_agents:
             policy = self.policies[uid]
             preprocessed_obs = self._state_preprocessor[uid](states[uid])
-            messages, obs_enc = policy.encode_messages(preprocessed_obs)
+            with jax.default_device(policy.device):
+                policy._c_i += 1
+                subkey = jax.random.fold_in(policy._c_key, policy._c_i)
+                gumbel_key = jax.random.fold_in(
+                    policy._c_key, policy._c_i + 1_000_000_000
+                )
+            messages, obs_enc = _jit_encode_messages(
+                policy.apply,
+                policy.state_dict.params,
+                preprocessed_obs,
+                gumbel_key,
+                subkey,
+            )
             per_agent_messages[uid] = messages  # (num_envs, message_dim)
             per_agent_obs_enc[uid] = obs_enc  # (num_envs, hidden_size)
 
@@ -205,24 +256,28 @@ class MAGICMAPPO(CategoricalMAPPO):
         )
         num_heads = int(magic_cfg.get("num_heads", policy0.num_heads))
 
-        VmappedComm = nn.vmap(
-            _CommunicateBlock,
-            variable_axes={"params": None},
-            split_rngs={"params": False},
-            in_axes=0,
-            out_axes=0,
-        )
-        comm_module = VmappedComm(
-            message_dim=message_dim,
-            num_comm_rounds=num_comm_rounds,
-            gumbel_temperature=gumbel_temperature,
-            num_heads=num_heads,
-            name="comm_block",
-        )
+        # Lazy-init: cache the VmappedComm module and a JIT'd apply fn
+        # so we don't recreate nn.vmap(_CommunicateBlock) every step.
+        if self._cached_comm_module is None:
+            VmappedComm = nn.vmap(
+                _CommunicateBlock,
+                variable_axes={"params": None},
+                split_rngs={"params": False},
+                in_axes=0,
+                out_axes=0,
+            )
+            self._cached_comm_module = VmappedComm(
+                message_dim=message_dim,
+                num_comm_rounds=num_comm_rounds,
+                gumbel_temperature=gumbel_temperature,
+                num_heads=num_heads,
+                name="comm_block",
+            )
+            self._jit_comm_apply = jax.jit(self._cached_comm_module.apply)
 
         # all_messages: (num_envs, N, message_dim) — already in the right shape.
         # group_keys: (num_envs,) — one PRNG key per group.
-        processed_grouped, adjs_grouped = comm_module.apply(
+        processed_grouped, adjs_grouped = self._jit_comm_apply(
             comm_block_params,
             all_messages,
             group_keys,
@@ -248,12 +303,21 @@ class MAGICMAPPO(CategoricalMAPPO):
             # Extract this agent's aggregated messages: (num_envs, message_dim)
             agent_agg_messages = processed_grouped[:, i, :]
 
-            agent_actions, agent_log_prob, agent_outputs = policy.act_with_messages(
-                obs=preprocessed_obs,
-                agg_messages=agent_agg_messages,
-                adj_matrices=adj_matrices,
-                hard_adj=hard_adj,
-                raw_messages=raw_messages,
+            with jax.default_device(policy.device):
+                policy._c_i += 1
+                subkey = jax.random.fold_in(policy._c_key, policy._c_i)
+                gumbel_key = jax.random.fold_in(
+                    policy._c_key, policy._c_i + 1_000_000_000
+                )
+
+            agent_actions, agent_log_prob, agent_outputs = _jit_act_with_messages(
+                policy.apply,
+                policy._c_unnormalized_log_prob,
+                policy.state_dict.params,
+                preprocessed_obs,
+                agent_agg_messages,
+                gumbel_key,
+                subkey,
             )
 
             actions[uid] = agent_actions

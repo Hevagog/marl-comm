@@ -92,6 +92,10 @@ def _jit_compute_gae_no_norm(
             * not_dones[i]
             * (_next_values + lambda_coefficient * advantage)
         )
+        # Squeeze to match the target shape — next_values may be (1,1)
+        # from the value function, causing advantage to broadcast to (1,1)
+        # while advantages[i] expects shape (1,).
+        advantage = advantage.squeeze()
         advantages = advantages.at[i].set(advantage)
     returns = advantages + values
     return returns, advantages

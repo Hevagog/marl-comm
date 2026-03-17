@@ -36,7 +36,7 @@ CONFIG = {
         "fps":             4,
     },
     "mappo": {
-        "rollouts":        400,      # number of rollouts before updating
+        "rollouts":        2000,      # number of rollouts before updating
         "learning_epochs": 8,       # learning epochs per update
         "mini_batches":    4,       # mini-batches per learning epoch
 
@@ -96,6 +96,6 @@ CONFIG = {
     },
 
     "memory": {
-        "size": 400,
+        "size": 2000,
     },
 }
