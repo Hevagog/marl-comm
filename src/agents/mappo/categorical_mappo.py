@@ -99,7 +99,7 @@ def _jit_compute_gae_no_norm(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("policy_act", "entropy_loss_scale", "debug_entropy"),
+    static_argnames=("policy_act", "debug_entropy"),
 )
 def _update_policy_fixed(
     policy_act,
@@ -109,7 +109,7 @@ def _update_policy_fixed(
     sampled_log_prob,
     sampled_advantages,
     ratio_clip,
-    entropy_loss_scale,
+    entropy_loss_scale,  # FIX B-02: now a traced arg (was static, caused recompilation)
     debug_entropy,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
@@ -150,9 +150,7 @@ def _update_policy_fixed(
         entropy = _categorical_entropy(logits)
         if debug_entropy:
             jax.debug.print("entropy mean: {}", entropy.mean())
-        entropy_loss = jnp.float32(0.0)
-        if entropy_loss_scale:
-            entropy_loss = -entropy_loss_scale * entropy.mean()
+        entropy_loss = -entropy_loss_scale * entropy.mean()
 
         total_loss = policy_loss + entropy_loss
 

@@ -1,5 +1,4 @@
 # fmt: off
-import jax.numpy as jnp
 
 from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
@@ -35,7 +34,7 @@ CONFIG = {
         "video_dir":       "recordings",
         "fps":             4,
     },
-    "mappo": {
+    "magic": {
         "rollouts":        400,      # number of rollouts before updating
         "learning_epochs": 8,       # learning epochs per update
         "mini_batches":    4,       # mini-batches per learning epoch
