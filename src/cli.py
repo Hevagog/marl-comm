@@ -90,10 +90,27 @@ def main() -> None:
             dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
             render_mode=mode,
         )
+    elif env_id == "overcooked":
+        try:
+            from environments.overcooked import OvercookedConfig, make_overcooked_env
+        except ImportError as exc:
+            raise ImportError(
+                "Overcooked environment requires overcooked-ai. "
+                "Install it with: pip install overcooked-ai"
+            ) from exc
+
+        oc_config = OvercookedConfig(
+            layout_name=env_cfg.get("layout_name", "cramped_room"),
+            horizon=env_cfg.get("horizon", env_cfg.get("max_cycles", 200)),
+            use_dense_obs=env_cfg.get("use_dense_obs", False),
+            reward_shaping=env_cfg.get("reward_shaping", True),
+            reward_shaping_factor=env_cfg.get("reward_shaping_factor", 1.0),
+        )
+        raw_env = make_overcooked_env(config=oc_config, render_mode=mode)
 
     else:
         raise ValueError(
-            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary']"
+            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked']"
         )
 
     env = wrap_env(raw_env, wrapper="pettingzoo")
