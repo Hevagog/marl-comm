@@ -20,6 +20,7 @@ CONFIG = {
 
     "env": {
         "id":            "coingame",
+        "num_envs":      16,           
         "grid_size":     5,
         "max_cycles":    50,
         "pick_reward":   1.0,

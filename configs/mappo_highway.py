@@ -19,6 +19,7 @@ CONFIG = {
 
     "env": {
         "id":                     "intersection",
+        "num_envs":               16,             
         "num_agents":             4,
         "duration":               13,           # steps per episode
         "vehicles_count":         10,           # vehicles in each agent's observation

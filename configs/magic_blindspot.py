@@ -19,6 +19,7 @@ CONFIG = {
 
     "env": {
         "id":            "blindspot",
+        "num_envs":      16,           
         "grid_size":     9,
         "max_cycles":    100,
         "num_traps":     5,

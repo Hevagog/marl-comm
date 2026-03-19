@@ -16,8 +16,9 @@ class MAPPORunner(BaseRunner):
         cfg = self._cfg
 
         memory_size: int = cfg["memory"]["size"]
+        num_envs: int = cfg.get("env", {}).get("num_envs", 1)
         memories: dict[str, RandomMemory] = {
-            agent: RandomMemory(memory_size=memory_size, num_envs=1)
+            agent: RandomMemory(memory_size=memory_size, num_envs=num_envs)
             for agent in env.possible_agents
         }
 

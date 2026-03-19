@@ -6,6 +6,10 @@ from environments.gridworld import (
 )
 from environments.highway import make_intersection_env, IntersectionConfig
 from environments.overcooked import make_overcooked_env, OvercookedConfig
+from environments.vectorized import (
+    VectorizedPettingZooEnv,
+    make_vectorized_env,
+)
 
 __all__ = [
     "make_coin_game_env",
@@ -16,4 +20,6 @@ __all__ = [
     "OvercookedConfig",
     "make_intersection_env",
     "IntersectionConfig",
+    "VectorizedPettingZooEnv",
+    "make_vectorized_env",
 ]

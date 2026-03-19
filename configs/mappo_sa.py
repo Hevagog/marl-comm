@@ -1,5 +1,4 @@
 # fmt: off
-import jax.numpy as jnp
 
 from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
@@ -20,6 +19,7 @@ CONFIG = {
 
     "env": {
         "id":            "simple_adversary",
+        "num_envs":      16,           
     },
     "training": {
         "timesteps": 8_000_000,

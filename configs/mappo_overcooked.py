@@ -19,6 +19,7 @@ CONFIG = {
 
     "env": {
         "id":                     "overcooked",
+        "num_envs":               16,             
         "layout_name":            "cramped_room",
         "horizon":                200,
         "use_dense_obs":          False,

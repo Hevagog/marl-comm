@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from skrl.envs.wrappers.jax import wrap_env
 
@@ -26,6 +28,80 @@ def _get_runner(agent_type: str):
     raise ValueError(
         f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer']}"
     )
+
+
+def _create_env_factory(
+    env_id: str, env_cfg: dict, render_mode: Literal["human", "rgb_array"] | None
+):
+    """Create a factory function for the specified environment.
+
+    This function returns a callable that creates a single environment instance.
+    Used by the vectorized environment wrapper.
+    """
+    match env_id:
+        case "coingame":
+            from environments import make_coin_game_env, CoinGameConfig
+
+            config = CoinGameConfig(
+                grid_size=env_cfg.get("grid_size", 7),
+                max_cycles=env_cfg.get("max_cycles", 50),
+                pick_reward=env_cfg.get("pick_reward", 1.0),
+                steal_penalty=env_cfg.get("steal_penalty", -2.0),
+            )
+            return partial(make_coin_game_env, config=config, render_mode=render_mode)
+
+        case "blindspot":
+            from environments import make_blind_spot_env, BlindSpotConfig
+
+            config = BlindSpotConfig(
+                grid_size=env_cfg.get("grid_size", 9),
+                max_cycles=env_cfg.get("max_cycles", 100),
+                num_traps=env_cfg.get("num_traps", 5),
+                use_communication=env_cfg.get("use_communication", False),
+            )
+            return partial(make_blind_spot_env, config=config, render_mode=render_mode)
+
+        case "simple_adversary":
+            from pettingzoo.mpe import simple_adversary_v3
+
+            return partial(
+                simple_adversary_v3.parallel_env,
+                N=env_cfg.get("N", env_cfg.get("num_good_agents", 2)),
+                max_cycles=env_cfg.get("max_cycles", 25),
+                continuous_actions=env_cfg.get("continuous_actions", False),
+                dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
+                render_mode=render_mode,
+            )
+
+        case "overcooked":
+            from environments import OvercookedConfig, make_overcooked_env
+
+            config = OvercookedConfig(
+                layout_name=env_cfg.get("layout_name", "cramped_room"),
+                horizon=env_cfg.get("horizon", env_cfg.get("max_cycles", 200)),
+                use_dense_obs=env_cfg.get("use_dense_obs", False),
+                reward_shaping=env_cfg.get("reward_shaping", True),
+                reward_shaping_factor=env_cfg.get("reward_shaping_factor", 1.0),
+            )
+            return partial(make_overcooked_env, config=config, render_mode=render_mode)
+
+        case "intersection":
+            from environments import IntersectionConfig, make_intersection_env
+
+            config = IntersectionConfig(
+                num_agents=env_cfg.get("num_agents", 4),
+                duration=env_cfg.get("duration", 13),
+                vehicles_count=env_cfg.get("vehicles_count", 10),
+                initial_vehicle_count=env_cfg.get("initial_vehicle_count", 10),
+            )
+            return partial(
+                make_intersection_env, config=config, render_mode=render_mode
+            )
+
+        case _:
+            raise ValueError(
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection']"
+            )
 
 
 def main() -> None:
@@ -54,81 +130,33 @@ def main() -> None:
     sys.path.insert(0, str(config_path.parent))
     cfg = load_config(config_path)
 
-    if args.task in ["eval", "record"]:
+    if args.task in ["eval", "record", "analyze"]:
+        num_envs = 1
         cfg["experiment"]["wandb"] = False
+    else:
+        num_envs = cfg.get("env", {}).get("num_envs", 1)
 
-    mode = "human" if args.task == "eval" else "rgb_array"
+    if "env" not in cfg:
+        cfg["env"] = {}
+    cfg["env"]["num_envs"] = num_envs
+
+    mode: Literal["human", "rgb_array"] | None = (
+        "human" if args.task == "eval" else "rgb_array"
+    )
+    if args.task == "train" and num_envs > 1:
+        mode = None
 
     env_cfg = cfg.get("env", {})
     env_id = env_cfg.get("id", "coingame")
 
-    match env_id:
-        case "coingame":
-            from environments import make_coin_game_env, CoinGameConfig
+    env_factory = _create_env_factory(env_id, env_cfg, mode)
+    if num_envs > 1:
+        from environments import make_vectorized_env
 
-            coin_config = CoinGameConfig(
-                grid_size=env_cfg.get("grid_size", 7),
-                max_cycles=env_cfg.get("max_cycles", 50),
-                pick_reward=env_cfg.get("pick_reward", 1.0),
-                steal_penalty=env_cfg.get("steal_penalty", -2.0),
-            )
-            raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
-        case "blindspot":
-            from environments import make_blind_spot_env, BlindSpotConfig
-
-            bs_config = BlindSpotConfig(
-                grid_size=env_cfg.get("grid_size", 9),
-                max_cycles=env_cfg.get("max_cycles", 100),
-                num_traps=env_cfg.get("num_traps", 5),
-                use_communication=env_cfg.get("use_communication", False),
-            )
-            raw_env = make_blind_spot_env(config=bs_config, render_mode=mode)
-        case "simple_adversary":
-            from pettingzoo.mpe import simple_adversary_v3
-
-            raw_env = simple_adversary_v3.parallel_env(
-                N=env_cfg.get("N", env_cfg.get("num_good_agents", 2)),
-                max_cycles=env_cfg.get("max_cycles", 25),
-                continuous_actions=env_cfg.get("continuous_actions", False),
-                dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
-                render_mode=mode,
-            )
-        case "overcooked":
-            from environments import OvercookedConfig, make_overcooked_env
-
-            oc_config = OvercookedConfig(
-                layout_name=env_cfg.get("layout_name", "cramped_room"),
-                horizon=env_cfg.get("horizon", env_cfg.get("max_cycles", 200)),
-                use_dense_obs=env_cfg.get("use_dense_obs", False),
-                reward_shaping=env_cfg.get("reward_shaping", True),
-                reward_shaping_factor=env_cfg.get("reward_shaping_factor", 1.0),
-            )
-            raw_env = make_overcooked_env(config=oc_config, render_mode=mode)
-
-        case "intersection":
-            from environments import IntersectionConfig, make_intersection_env
-
-            config = IntersectionConfig(
-                num_agents=env_cfg.get("num_agents", 4),
-                duration=env_cfg.get("duration", 13),
-                vehicles_count=env_cfg.get("vehicles_count", 10),
-                features=env_cfg.get("features", ["presence", "x", "y", "vx", "vy"]),
-                initial_vehicle_count=env_cfg.get("initial_vehicle_count", 10),
-                spawn_probability=env_cfg.get("spawn_probability", 0.6),
-                collision_reward=env_cfg.get("collision_reward", -5.0),
-                arrived_reward=env_cfg.get("arrived_reward", 1.0),
-                high_speed_reward=env_cfg.get("high_speed_reward", 1.0),
-                reward_speed_range=env_cfg.get("reward_speed_range", [7.0, 9.0]),
-                normalize_reward=env_cfg.get("normalize_reward", True),
-                simulation_frequency=env_cfg.get("simulation_frequency", 15),
-                policy_frequency=env_cfg.get("policy_frequency", 1),
-            )
-            raw_env = make_intersection_env(config=config, render_mode=mode)
-
-        case _:
-            raise ValueError(
-                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection']"
-            )
+        raw_env = make_vectorized_env(env_fn=env_factory, num_envs=num_envs)
+        print(f"Created vectorized environment with {num_envs} parallel instances")
+    else:
+        raw_env = env_factory()
 
     env = wrap_env(raw_env, wrapper="pettingzoo")
 
