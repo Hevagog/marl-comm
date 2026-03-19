@@ -19,8 +19,12 @@ def _get_runner(agent_type: str):
         from agents.magic.train import MAGICRunner
 
         return MAGICRunner
+    if agent_type == "commformer":
+        from agents.commformer.train import CommFormerRunner
+
+        return CommFormerRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer']}"
     )
 
 
@@ -58,60 +62,73 @@ def main() -> None:
     env_cfg = cfg.get("env", {})
     env_id = env_cfg.get("id", "coingame")
 
-    if env_id == "coingame":
-        from environments.gridworld.coingame.config import CoinGameConfig
-        from environments import make_coin_game_env
+    match env_id:
+        case "coingame":
+            from environments import make_coin_game_env, CoinGameConfig
 
-        coin_config = CoinGameConfig(
-            grid_size=env_cfg.get("grid_size", 7),
-            max_cycles=env_cfg.get("max_cycles", 50),
-            pick_reward=env_cfg.get("pick_reward", 1.0),
-            steal_penalty=env_cfg.get("steal_penalty", -2.0),
-        )
-        raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
-    elif env_id == "blindspot":
-        from environments.gridworld.blindspot.config import BlindSpotConfig
-        from environments.gridworld.blindspot.blindspot import make_blind_spot_env
+            coin_config = CoinGameConfig(
+                grid_size=env_cfg.get("grid_size", 7),
+                max_cycles=env_cfg.get("max_cycles", 50),
+                pick_reward=env_cfg.get("pick_reward", 1.0),
+                steal_penalty=env_cfg.get("steal_penalty", -2.0),
+            )
+            raw_env = make_coin_game_env(config=coin_config, render_mode=mode)
+        case "blindspot":
+            from environments import make_blind_spot_env, BlindSpotConfig
 
-        bs_config = BlindSpotConfig(
-            grid_size=env_cfg.get("grid_size", 9),
-            max_cycles=env_cfg.get("max_cycles", 100),
-            num_traps=env_cfg.get("num_traps", 5),
-            use_communication=env_cfg.get("use_communication", False),
-        )
-        raw_env = make_blind_spot_env(config=bs_config, render_mode=mode)
-    elif env_id == "simple_adversary":
-        from pettingzoo.mpe import simple_adversary_v3
+            bs_config = BlindSpotConfig(
+                grid_size=env_cfg.get("grid_size", 9),
+                max_cycles=env_cfg.get("max_cycles", 100),
+                num_traps=env_cfg.get("num_traps", 5),
+                use_communication=env_cfg.get("use_communication", False),
+            )
+            raw_env = make_blind_spot_env(config=bs_config, render_mode=mode)
+        case "simple_adversary":
+            from pettingzoo.mpe import simple_adversary_v3
 
-        raw_env = simple_adversary_v3.parallel_env(
-            N=env_cfg.get("N", env_cfg.get("num_good_agents", 2)),
-            max_cycles=env_cfg.get("max_cycles", 25),
-            continuous_actions=env_cfg.get("continuous_actions", False),
-            dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
-            render_mode=mode,
-        )
-    elif env_id == "overcooked":
-        try:
-            from environments.overcooked import OvercookedConfig, make_overcooked_env
-        except ImportError as exc:
-            raise ImportError(
-                "Overcooked environment requires overcooked-ai. "
-                "Install it with: pip install overcooked-ai"
-            ) from exc
+            raw_env = simple_adversary_v3.parallel_env(
+                N=env_cfg.get("N", env_cfg.get("num_good_agents", 2)),
+                max_cycles=env_cfg.get("max_cycles", 25),
+                continuous_actions=env_cfg.get("continuous_actions", False),
+                dynamic_rescaling=env_cfg.get("dynamic_rescaling", False),
+                render_mode=mode,
+            )
+        case "overcooked":
+            from environments import OvercookedConfig, make_overcooked_env
 
-        oc_config = OvercookedConfig(
-            layout_name=env_cfg.get("layout_name", "cramped_room"),
-            horizon=env_cfg.get("horizon", env_cfg.get("max_cycles", 200)),
-            use_dense_obs=env_cfg.get("use_dense_obs", False),
-            reward_shaping=env_cfg.get("reward_shaping", True),
-            reward_shaping_factor=env_cfg.get("reward_shaping_factor", 1.0),
-        )
-        raw_env = make_overcooked_env(config=oc_config, render_mode=mode)
+            oc_config = OvercookedConfig(
+                layout_name=env_cfg.get("layout_name", "cramped_room"),
+                horizon=env_cfg.get("horizon", env_cfg.get("max_cycles", 200)),
+                use_dense_obs=env_cfg.get("use_dense_obs", False),
+                reward_shaping=env_cfg.get("reward_shaping", True),
+                reward_shaping_factor=env_cfg.get("reward_shaping_factor", 1.0),
+            )
+            raw_env = make_overcooked_env(config=oc_config, render_mode=mode)
 
-    else:
-        raise ValueError(
-            f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked']"
-        )
+        case "intersection":
+            from environments import IntersectionConfig, make_intersection_env
+
+            config = IntersectionConfig(
+                num_agents=env_cfg.get("num_agents", 4),
+                duration=env_cfg.get("duration", 13),
+                vehicles_count=env_cfg.get("vehicles_count", 10),
+                features=env_cfg.get("features", ["presence", "x", "y", "vx", "vy"]),
+                initial_vehicle_count=env_cfg.get("initial_vehicle_count", 10),
+                spawn_probability=env_cfg.get("spawn_probability", 0.6),
+                collision_reward=env_cfg.get("collision_reward", -5.0),
+                arrived_reward=env_cfg.get("arrived_reward", 1.0),
+                high_speed_reward=env_cfg.get("high_speed_reward", 1.0),
+                reward_speed_range=env_cfg.get("reward_speed_range", [7.0, 9.0]),
+                normalize_reward=env_cfg.get("normalize_reward", True),
+                simulation_frequency=env_cfg.get("simulation_frequency", 15),
+                policy_frequency=env_cfg.get("policy_frequency", 1),
+            )
+            raw_env = make_intersection_env(config=config, render_mode=mode)
+
+        case _:
+            raise ValueError(
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection']"
+            )
 
     env = wrap_env(raw_env, wrapper="pettingzoo")
 

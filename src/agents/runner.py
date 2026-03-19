@@ -176,6 +176,42 @@ class BaseRunner(ABC):
 
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_overcooked_figures(data, output_dir=output_dir, prefix=exp_name)
+        elif env_id == "intersection":
+            from utils import HighwayIntersectionEvalCollector, save_all_highway_figures
+
+            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
+                from utils import (
+                    MAGICHighwayCommCollector,
+                    save_all_magic_highway_figures,
+                )
+
+                collector = MAGICHighwayCommCollector(
+                    num_agents=env_cfg.get("num_agents", 4),
+                    duration=env_cfg.get("duration", 13),
+                    num_comm_rounds=self._cfg.get("magic", {}).get(
+                        "num_comm_rounds", 2
+                    ),
+                    message_dim=self._cfg.get("magic", {}).get("message_dim", 64),
+                )
+                data = collector.collect(
+                    env=self._env, agent=self._agent, n_episodes=n_episodes
+                )
+                exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+                save_all_magic_highway_figures(
+                    data, output_dir=f"{output_dir}/magic", prefix=exp_name
+                )
+
+            collector = HighwayIntersectionEvalCollector(
+                num_agents=env_cfg.get("num_agents", 4),
+                duration=env_cfg.get("duration", 13),
+                collision_reward=env_cfg.get("collision_reward", -5.0),
+                arrived_reward=env_cfg.get("arrived_reward", 1.0),
+            )
+            data = collector.collect(
+                env=self._env, agent=self._agent, n_episodes=n_episodes
+            )
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_highway_figures(data, output_dir=output_dir, prefix=exp_name)
         else:
             from utils import EvalCollector, save_all_figures
 

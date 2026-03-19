@@ -3,6 +3,10 @@ from utils.eval_analysis import EvalCollector
 from utils.eval_visualizer import save_all_figures
 from utils.simple_adversary_eval_analysis import SimpleAdversaryEvalCollector
 from utils.simple_adversary_eval_visualizer import save_all_sa_figures
+from utils.highway_eval_analysis import HighwayIntersectionEvalCollector
+from utils.highway_eval_visualizer import save_all_highway_figures
+from utils.magic_highway_comm_analysis import MAGICHighwayCommCollector
+from utils.magic_highway_comm_visualizer import save_all_magic_highway_figures
 
 
 __all__ = [
@@ -11,4 +15,8 @@ __all__ = [
     "save_all_figures",
     "SimpleAdversaryEvalCollector",
     "save_all_sa_figures",
+    "HighwayIntersectionEvalCollector",
+    "save_all_highway_figures",
+    "MAGICHighwayCommCollector",
+    "save_all_magic_highway_figures",
 ]
