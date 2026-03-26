@@ -492,7 +492,7 @@ class CategoricalMAPPO(MAPPO):
             tensors = {}
             for name in self._tensors_names:
                 t = memory.get_tensor_by_name(name)
-                tensors[name] = t.reshape(t.shape[0], t.shape[-1])
+                tensors[name] = t.reshape(-1, t.shape[-1])
             # Preprocess states per-agent (each has its own scaler with correct size)
             # train=True only on first call to update running stats once
             tensors["states"] = self._state_preprocessor[uid](
