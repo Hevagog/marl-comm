@@ -29,8 +29,8 @@ Common layouts for coordination study:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Mapping, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, Literal, Mapping, Tuple
 
 import gymnasium
 import numpy as np
@@ -220,7 +220,9 @@ class OvercookedPettingZooEnv:
         infos = {a: {} for a in self._agents}
         return obs, infos
 
-    def step(self, actions: Mapping[str, int | np.integer]) -> Tuple[
+    def step(
+        self, actions: Mapping[str, int | np.integer]
+    ) -> Tuple[
         Dict[str, np.ndarray],
         Dict[str, float],
         Dict[str, bool],

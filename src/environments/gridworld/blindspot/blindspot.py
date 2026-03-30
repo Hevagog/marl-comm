@@ -218,7 +218,10 @@ class BlindSpotEnv:
             self._possible_agents[0]: (0, 0),
             self._possible_agents[1]: (1, 0),
         }
-        self._goal = (self._config.grid_size - 1, self._config.grid_size - 1)
+        if self._config.random_goal:
+            self._goal = self.randomize_goal()
+        else:
+            self._goal = (self._config.grid_size - 1, self._config.grid_size - 1)
 
         self._reached_goal = {a: False for a in self._possible_agents}
         self._messages = {a: 0 for a in self._possible_agents}
@@ -227,12 +230,44 @@ class BlindSpotEnv:
         self._traps = self._place_traps()
 
         obs = self._get_observations()
-        infos: Dict[str, dict] = {a: {} for a in self._agents}
+        infos: Dict[str, dict] = {a: {"goal": self._goal} for a in self._agents}
         return obs, infos
 
-    def step(
-        self, actions: Mapping[str, int | np.integer]
-    ) -> Tuple[
+    def randomize_goal(self) -> tuple[int, int]:
+        """Sample a goal cell not too close to either agent spawn."""
+        gs = self._config.grid_size
+        if gs <= 1:
+            return (0, 0)
+
+        start_positions = list(self._positions.values()) or [(0, 0), (1, 0)]
+
+        min_dist = self._config.min_goal_start_distance
+        if min_dist is None:
+            min_dist = max(2, gs // 2)
+
+        # Exclude spawn cells
+        candidate_cells = [
+            (x, y)
+            for x in range(gs)
+            for y in range(gs)
+            if (x, y) not in start_positions
+        ]
+
+        # Keep only cells sufficiently far from BOTH starts
+        far_cells = []
+        for x, y in candidate_cells:
+            d = min(abs(x - sx) + abs(y - sy) for sx, sy in start_positions)
+            if d >= min_dist:
+                far_cells.append((x, y))
+
+        pool = far_cells if far_cells else candidate_cells
+        if not pool:
+            return (gs - 1, gs - 1)
+
+        idx = int(self._rng.integers(0, len(pool)))
+        return pool[idx]
+
+    def step(self, actions: Mapping[str, int | np.integer]) -> Tuple[
         Dict[str, np.ndarray],
         Dict[str, float],
         Dict[str, bool],
@@ -323,6 +358,7 @@ class BlindSpotEnv:
             a: {
                 "reached_goal": self._reached_goal[a],
                 "step": self._step_count,
+                "goal": self._goal,
             }
             for a in self._possible_agents
         }

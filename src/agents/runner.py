@@ -21,6 +21,36 @@ class BaseRunner(ABC):
         """Construct and return the configured multi-agent instance."""
         raise NotImplementedError
 
+    def _sync_preprocessor_sizes(self, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+        """Align scaler sizes with the live environment spaces."""
+        possible_agents = tuple(self._env.possible_agents)
+        if not possible_agents:
+            return agent_cfg
+
+        def _flat_size(space: Any) -> int:
+            shape = getattr(space, "shape", None)
+            if shape is None:
+                raise ValueError(f"Space {space!r} does not expose a shape")
+            size = 1
+            for dim in shape:
+                size *= int(dim)
+            return int(size)
+
+        first_agent = possible_agents[0]
+        obs_size = _flat_size(self._env.observation_spaces[first_agent])
+        shared_obs_size = _flat_size(self._env.state_spaces[first_agent])
+
+        state_kwargs = dict(agent_cfg.get("state_preprocessor_kwargs", {}))
+        state_kwargs["size"] = obs_size
+        agent_cfg["state_preprocessor_kwargs"] = state_kwargs
+
+        shared_state_kwargs = dict(
+            agent_cfg.get("shared_state_preprocessor_kwargs", {})
+        )
+        shared_state_kwargs["size"] = shared_obs_size
+        agent_cfg["shared_state_preprocessor_kwargs"] = shared_state_kwargs
+        return agent_cfg
+
     def train(self) -> None:
         """Run the full training loop."""
         train_cfg = self._cfg["training"]

@@ -36,6 +36,7 @@ class MAGICRunner(BaseRunner):
         # Merge MAGIC-specific PPO params (rollouts, learning_rate, etc.)
         for key, value in project_cfg.items():
             mappo_cfg[key] = value
+        mappo_cfg = super()._sync_preprocessor_sizes(mappo_cfg)
 
         exp = cfg.get("experiment", {})
         mappo_cfg["experiment"]["directory"] = exp.get("directory", "")

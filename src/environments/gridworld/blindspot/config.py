@@ -5,7 +5,7 @@ from dataclasses import dataclass
 class BlindSpotConfig:
     """Configuration for the Blind-Spot Navigation environment."""
 
-    grid_size: int = 9
+    grid_size: int = 7
     """Side length of the square grid."""
 
     max_cycles: int = 100
@@ -20,13 +20,13 @@ class BlindSpotConfig:
     goal_reward: float = 10.0
     """Reward granted when an agent reaches the goal."""
 
-    vision_range: int = 1
+    vision_range: int = 0
     """Agent B's vision radius (1 -> 3x3 window)."""
 
     step_penalty: float = -0.01
     """Small per-step cost to encourage efficiency."""
 
-    use_distance_shaping: bool = True
+    use_distance_shaping: bool = False
     """Enable potential-based reward shaping (Ng et al. 1999) using
     Manhattan distance to goal.  Provides a reward gradient so that
     the preference prior C can learn even before the goal is reached."""
@@ -70,3 +70,15 @@ class BlindSpotConfig:
     With 5 movement actions and M=4 tokens, composite action space has
     5*4 = 20 actions.  Tabular B grows from (5, 16, 16) = 1,280 cells
     to (20, 16, 16) = 5,120 cells — still manageable for 2M+ steps."""
+
+    random_goal: bool = True
+    """If True, sample a new goal position at every reset()."""
+
+    min_goal_start_distance: int | None = None
+    """Minimum Manhattan distance from BOTH spawn positions for sampled goals.
+
+    If None, a dynamic default is used:
+        max(2, grid_size // 2)
+
+    This avoids trivially easy episodes where the goal spawns near starts.
+    """
