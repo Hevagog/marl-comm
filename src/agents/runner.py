@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 from skrl.trainers.jax import SequentialTrainer
 
+from utils.warehouse_eval_analysis import WarehouseEvalCollector
+from utils.warehouse_eval_visualizer import save_all_warehouse_figures
+
 if TYPE_CHECKING:
     from skrl.multi_agents.jax import MultiAgent
 
@@ -104,6 +107,9 @@ class BaseRunner(ABC):
 
         frames: list[np.ndarray] = []
         obs, _ = self._env.reset()
+        frame = self._env.render()
+        if frame is not None:
+            frames.append(frame)
 
         for _ in range(max_steps):
             actions, _, _ = self._agent.act(obs, timestep=0, timesteps=max_steps)
@@ -116,6 +122,9 @@ class BaseRunner(ABC):
             done_values = list(truncated.values()) + list(terminated.values())
             if any(bool(v) for v in done_values):
                 obs, _ = self._env.reset()
+                frame = self._env.render()
+                if frame is not None:
+                    frames.append(frame)
 
         if frames:
             imageio.mimwrite(str(out_path), frames, fps=fps)
@@ -126,7 +135,7 @@ class BaseRunner(ABC):
     def analyze(
         self,
         checkpoint_path: str | None = None,
-        n_episodes: int = 30,
+        n_episodes: int = 5,
         output_dir: str = "eval_plots",
     ) -> None:
         path = checkpoint_path or self._cfg.get("eval", {}).get("checkpoint_path")
@@ -242,6 +251,38 @@ class BaseRunner(ABC):
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_highway_figures(data, output_dir=output_dir, prefix=exp_name)
+        elif env_id == "warehouse":
+            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
+                from utils import (
+                    MAGICWarehouseCommCollector,
+                    save_all_magic_warehouse_figures,
+                )
+
+                collector = MAGICWarehouseCommCollector(
+                    num_agents=env_cfg.get("num_agents", 4),
+                    num_comm_rounds=self._cfg.get("magic", {}).get(
+                        "num_comm_rounds", 2
+                    ),
+                    message_dim=self._cfg.get("magic", {}).get("message_dim", 64),
+                    battery_capacity=env_cfg.get("battery_capacity", 160.0),
+                )
+                data = collector.collect(
+                    env=self._env, agent=self._agent, n_episodes=n_episodes
+                )
+                exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+                save_all_magic_warehouse_figures(
+                    data, output_dir=f"{output_dir}/magic", prefix=exp_name
+                )
+            collector = WarehouseEvalCollector(
+                num_agents=env_cfg.get("num_agents", 4),
+                battery_capacity=env_cfg.get("battery_capacity", 160.0),
+            )
+            data = collector.collect(
+                env=self._env, agent=self._agent, n_episodes=n_episodes
+            )
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_warehouse_figures(data, output_dir=output_dir, prefix=exp_name)
+
         else:
             from utils import EvalCollector, save_all_figures
 

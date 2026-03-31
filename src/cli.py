@@ -58,6 +58,8 @@ def _create_env_factory(
                 max_cycles=env_cfg.get("max_cycles", 100),
                 num_traps=env_cfg.get("num_traps", 5),
                 use_communication=env_cfg.get("use_communication", False),
+                random_goal=env_cfg.get("random_goal", True),
+                min_goal_start_distance=env_cfg.get("min_goal_start_distance", 4),
             )
             return partial(make_blind_spot_env, config=config, render_mode=render_mode)
 
@@ -98,9 +100,20 @@ def _create_env_factory(
                 make_intersection_env, config=config, render_mode=render_mode
             )
 
+        case "warehouse":
+            from environments import make_warehouse_env, WarehouseConfig
+
+            config_kwargs = {
+                key: value
+                for key, value in env_cfg.items()
+                if key in WarehouseConfig.__dataclass_fields__
+            }
+            config = WarehouseConfig(**config_kwargs)
+            return partial(make_warehouse_env, config=config, render_mode=render_mode)
+
         case _:
             raise ValueError(
-                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection']"
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'warehouse']"
             )
 
 

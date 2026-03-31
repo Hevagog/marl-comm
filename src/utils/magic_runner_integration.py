@@ -157,6 +157,55 @@ def run_magic_analysis(
         )
         return
 
+    if env_id == "warehouse":
+        from utils.magic_warehouse_comm_analysis import MAGICWarehouseCommCollector
+        from utils.magic_warehouse_comm_visualizer import save_all_magic_warehouse_figures
+        from utils.warehouse_eval_analysis import WarehouseEvalCollector
+        from utils.warehouse_eval_visualizer import save_all_warehouse_figures
+
+        wh_collector = MAGICWarehouseCommCollector(
+            grid_height=env_cfg.get("grid_height", 12),
+            grid_width=env_cfg.get("grid_width", 16),
+            num_agents=env_cfg.get("num_agents", 4),
+            num_comm_rounds=magic_cfg.get("num_comm_rounds", 2),
+            message_dim=magic_cfg.get("message_dim", 128),
+            battery_capacity=float(env_cfg.get("battery_capacity", 160)),
+            max_cycles=env_cfg.get("max_cycles", 500),
+        )
+
+        print(f"\n[MAGIC Warehouse Analysis] Collecting {n_episodes} episodes …")
+        comm_data = wh_collector.collect(
+            env=runner._env,
+            agent=runner._agent,
+            n_episodes=n_episodes,
+        )
+        save_all_magic_warehouse_figures(
+            comm_data,
+            output_dir=f"{output_dir}/comm",
+            prefix=exp_name,
+        )
+
+        # Also run performance analysis (MAPPO-style metrics)
+        perf_collector = WarehouseEvalCollector(
+            grid_height=env_cfg.get("grid_height", 12),
+            grid_width=env_cfg.get("grid_width", 16),
+            num_agents=env_cfg.get("num_agents", 4),
+            max_cycles=env_cfg.get("max_cycles", 500),
+            battery_capacity=float(env_cfg.get("battery_capacity", 160)),
+        )
+        print(f"\n[Warehouse Performance Analysis] Collecting {n_episodes} episodes …")
+        perf_data = perf_collector.collect(
+            env=runner._env,
+            agent=runner._agent,
+            n_episodes=n_episodes,
+        )
+        save_all_warehouse_figures(
+            perf_data,
+            output_dir=f"{output_dir}/perf",
+            prefix=exp_name,
+        )
+        return
+
     collector = MAGICCommCollector(
         grid_size=env_cfg.get("grid_size", 9),
         num_traps=env_cfg.get("num_traps", 5),

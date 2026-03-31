@@ -10,6 +10,7 @@ from environments.vectorized import (
     VectorizedPettingZooEnv,
     make_vectorized_env,
 )
+from environments.warehouse_grid import make_warehouse_env, WarehouseConfig
 
 __all__ = [
     "make_coin_game_env",
@@ -22,4 +23,6 @@ __all__ = [
     "IntersectionConfig",
     "VectorizedPettingZooEnv",
     "make_vectorized_env",
+    "WarehouseConfig",
+    "make_warehouse_env",
 ]

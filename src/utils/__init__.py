@@ -7,6 +7,10 @@ from utils.highway_eval_analysis import HighwayIntersectionEvalCollector
 from utils.highway_eval_visualizer import save_all_highway_figures
 from utils.magic_highway_comm_analysis import MAGICHighwayCommCollector
 from utils.magic_highway_comm_visualizer import save_all_magic_highway_figures
+from utils.warehouse_eval_analysis import WarehouseEvalCollector
+from utils.warehouse_eval_visualizer import save_all_warehouse_figures
+from utils.magic_warehouse_comm_analysis import MAGICWarehouseCommCollector
+from utils.magic_warehouse_comm_visualizer import save_all_magic_warehouse_figures
 
 
 __all__ = [
@@ -19,4 +23,8 @@ __all__ = [
     "save_all_highway_figures",
     "MAGICHighwayCommCollector",
     "save_all_magic_highway_figures",
+    "WarehouseEvalCollector",
+    "save_all_warehouse_figures",
+    "MAGICWarehouseCommCollector",
+    "save_all_magic_warehouse_figures",
 ]
