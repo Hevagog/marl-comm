@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import functools
-from typing import Mapping, Union
+from collections.abc import Mapping
 
 import flax.linen as nn
 import jax
@@ -91,18 +91,33 @@ class MAGICMAPPO(CategoricalMAPPO):
 
     def act(
         self,
-        states: Mapping[str, Union[np.ndarray, jax.Array]],
+        states: Mapping[str, np.ndarray | jax.Array],
         timestep: int,
         timesteps: int,
     ) -> tuple:
+        # Compute current Gumbel temperature (linear annealing from start→end
+        # over the first ``anneal_frac`` of training).  Enables dynamic
+        # sharpening of the Scheduler's Gumbel-Softmax without JIT recompilation
+        # (temperature is injected as a traced JAX scalar via inputs dict).
+        magic_cfg = getattr(self, "cfg", {}).get("magic", {})
+        t_start = float(magic_cfg.get("gumbel_temperature", 1.0))
+        t_end = float(magic_cfg.get("gumbel_temperature_end", t_start))
+        anneal_frac = float(magic_cfg.get("gumbel_temperature_anneal_fraction", 0.5))
+        if timesteps > 0 and anneal_frac > 0.0 and t_end != t_start:
+            progress = min(float(timestep) / (float(timesteps) * anneal_frac), 1.0)
+            current_temp = t_start + progress * (t_end - t_start)
+        else:
+            current_temp = t_start
+
         if self._shared_policy:
-            return self._act_homogeneous(states)
+            return self._act_homogeneous(states, current_temp)
         else:
             return self._act_heterogeneous(states)
 
     def _act_homogeneous(
         self,
-        states: Mapping[str, Union[np.ndarray, jax.Array]],
+        states: Mapping[str, np.ndarray | jax.Array],
+        current_temp: float = 1.0,
     ) -> tuple:
         """Stack all agents' observations and call the shared policy once.
 
@@ -135,8 +150,11 @@ class MAGICMAPPO(CategoricalMAPPO):
 
         # Call shared policy once with all agents' observations.
         # MAGICPolicyNet.act injects the Gumbel RNG automatically.
+        # gumbel_temperature_override passes the annealed temperature without
+        # triggering JIT recompilation (consumed as a traced JAX scalar in __call__).
         actions_all, log_prob_all, outputs_all = policy.act(
-            {"states": stacked_obs}, role="policy"
+            {"states": stacked_obs, "gumbel_temperature_override": current_temp},
+            role="policy",
         )
 
         # Split results per agent.
@@ -170,7 +188,7 @@ class MAGICMAPPO(CategoricalMAPPO):
 
     def _act_heterogeneous(
         self,
-        states: Mapping[str, Union[np.ndarray, jax.Array]],
+        states: Mapping[str, np.ndarray | jax.Array],
     ) -> tuple:
         """Generate actions for heterogeneous agents with cross-agent communication.
 

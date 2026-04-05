@@ -112,6 +112,7 @@ class SubScheduler(nn.Module):
         messages: jax.Array,
         rng: jax.Array | None = None,
         hard: bool = True,
+        temperature_override: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array]:
         """
         Parameters
@@ -120,6 +121,8 @@ class SubScheduler(nn.Module):
         rng : PRNGKey for Gumbel sampling.  If None, use deterministic argmax.
         hard : If True, produce hard (binary) adjacency via straight-through
                Gumbel-Softmax.
+        temperature_override : optional JAX scalar to override ``self.temperature``.
+            Enables dynamic annealing without triggering JIT recompilation.
 
         Returns
         -------
@@ -149,7 +152,12 @@ class SubScheduler(nn.Module):
         logits = nn.Dense(2, name="mlp2")(h)  # (N, N, 2) — binary [no-edge, edge]
 
         # Gumbel-Softmax (Jang et al. 2017, used in MAGIC §4.2) ---
-        adj = gumbel_softmax(logits, rng=rng, temperature=self.temperature, hard=hard)
+        temperature = (
+            temperature_override
+            if temperature_override is not None
+            else self.temperature
+        )
+        adj = gumbel_softmax(logits, rng=rng, temperature=temperature, hard=hard)
         # Take the "edge present" channel  (index 1)
         adj = adj[..., 1]  # (N, N)
 
@@ -176,6 +184,7 @@ class Scheduler(nn.Module):
         messages: jax.Array,
         rng: jax.Array | None = None,
         hard: bool = True,
+        temperature_override: jax.Array | None = None,
     ) -> list[jax.Array]:
         adjs: list[jax.Array] = []
         for round in range(self.num_rounds):
@@ -189,7 +198,12 @@ class Scheduler(nn.Module):
                 rng, sub_rng = jax.random.split(rng)
             else:
                 sub_rng = None
-            adj, _ = sub(messages, rng=sub_rng, hard=hard)
+            adj, _ = sub(
+                messages,
+                rng=sub_rng,
+                hard=hard,
+                temperature_override=temperature_override,
+            )
             adjs.append(adj)
         return adjs
 
@@ -209,7 +223,7 @@ class MessageProcessor(nn.Module):
     def __call__(
         self,
         messages: jax.Array,
-        adjs: Sequence[jax.Array],
+        adjs: jax.Array | Sequence[jax.Array],
     ) -> jax.Array:
         m = messages
         for round in range(self.num_rounds):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any
+from collections.abc import Sequence, Mapping
 
 import flax.linen as nn
 import jax
@@ -39,13 +40,14 @@ class _CommunicateBlock(nn.Module):
         self,
         msg_group: jax.Array,  # (N, message_dim)
         rng: jax.Array | None = None,
-    ) -> Tuple[jax.Array, jax.Array]:  # (processed, adjs)
+        temperature_override: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:  # (processed, adjs)
         adjs_raw = Scheduler(
             hidden_dim=self.message_dim,
             num_rounds=self.num_comm_rounds,
             temperature=self.gumbel_temperature,
             name="scheduler",
-        )(msg_group, rng=rng, hard=True)
+        )(msg_group, rng=rng, hard=True, temperature_override=temperature_override)
 
         # Scheduler may return either:
         #   (a) a stacked JAX array of shape (num_rounds, N, N), or
@@ -61,9 +63,7 @@ class _CommunicateBlock(nn.Module):
             num_heads=self.num_heads,
             num_rounds=self.num_comm_rounds,
             name="msg_processor",
-        )(
-            msg_group, adjs
-        )  # (N, message_dim)
+        )(msg_group, adjs)  # (N, message_dim)
 
         return processed, adjs  # (N, msg_dim), (R, N, N)
 
@@ -141,7 +141,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         self,
         inputs: Mapping[str, Any],
         role: str = "",
-    ) -> Tuple[jax.Array, dict]:
+    ) -> tuple[jax.Array, dict]:
         """
         Parameters
         ----------
@@ -181,6 +181,12 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         b = x.shape[0]
 
         gumbel_rng = inputs.get("gumbel_rng", jax.random.PRNGKey(0))
+        temperature_override = inputs.get("gumbel_temperature_override", None)
+        _temp_ov = (
+            jnp.asarray(temperature_override, dtype=jnp.float32)
+            if temperature_override is not None
+            else jnp.asarray(self.gumbel_temperature, dtype=jnp.float32)
+        )
 
         # Observation encoder
         obs_enc = nn.Dense(
@@ -197,9 +203,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="msg_encoder",
-        )(
-            obs_enc
-        )  # (B, message_dim)
+        )(obs_enc)  # (B, message_dim)
 
         # encode_only mode: return messages without running the comm block.
         # IMPORTANT: key off `role` (a static Python string), not an entry in
@@ -224,7 +228,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None])
+            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov))
             # Also touch msg_decoder and action_fc layers.
             _dummy_proc = jnp.zeros((b, self.message_dim))
             _dummy_dec = nn.Dense(
@@ -290,7 +294,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None])
+            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov))
         else:
             comm_active = (b >= n) and (b % n == 0)
             groups = b // n if comm_active else 1
@@ -318,7 +322,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                     gumbel_temperature=self.gumbel_temperature,
                     num_heads=self.num_heads,
                     name="comm_block",
-                )(msg_grouped, group_keys)
+                )(msg_grouped, group_keys, jnp.full((groups,), _temp_ov))
                 # processed_grouped : (groups, N, message_dim)
                 # adjs_grouped      : (groups, num_rounds, N, N)
 
@@ -368,9 +372,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
             bias_init=nn.initializers.constant(0.0),
             name="action_logits",
-        )(
-            h
-        )  # (B, num_actions)
+        )(h)  # (B, num_actions)
 
         # Pack all communication tensors into the outputs dict so that
         # act() can forward them to callers (e.g. the analysis collector).
@@ -405,10 +407,10 @@ class MAGICPolicyNet(CategoricalMixin, Model):
 
     def act(
         self,
-        inputs: Mapping[str, Union[Union[np.ndarray, jax.Array], Any]],
+        inputs: Mapping[str, np.ndarray | jax.Array | Any],
         role: str = "",
-        params: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, Union[jax.Array, None], Mapping[str, Union[jax.Array, Any]]]:
+        params: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array | None, Mapping[str, jax.Array | Any]]:
         """Override CategoricalMixin.act to inject Gumbel RNG and forward
         communication tensors to callers.
 
@@ -452,9 +454,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
     def encode_messages(
         self,
         obs: jax.Array,
-        gumbel_rng: Optional[jax.Array] = None,
-        params: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, jax.Array]:
+        gumbel_rng: jax.Array | None = None,
+        params: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:
         """Encode observations to message embeddings without running the comm block.
 
         Returns
@@ -490,8 +492,8 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         adj_matrices: jax.Array,
         hard_adj: jax.Array,
         raw_messages: jax.Array,
-        params: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, jax.Array, dict]:
+        params: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, dict]:
         """Generate actions using pre-computed aggregated messages.
 
         Parameters
