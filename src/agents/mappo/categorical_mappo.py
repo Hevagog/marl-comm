@@ -103,7 +103,7 @@ def _jit_compute_gae_no_norm(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("policy_act", "debug_entropy"),
+    static_argnames=("policy_act", "debug_entropy", "comm_reg_scale"),
 )
 def _update_policy_fixed(
     policy_act,
@@ -115,6 +115,7 @@ def _update_policy_fixed(
     ratio_clip,
     entropy_loss_scale,  # FIX B-02: now a traced arg (was static, caused recompilation)
     debug_entropy,
+    comm_reg_scale=0.0,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
 
@@ -124,11 +125,19 @@ def _update_policy_fixed(
     2. **Mini-batch advantage normalisation** — normalises advantages
        *within each mini-batch* (MAPPO paper, Section 5.1) rather than
        relying on the buffer-level normalisation in ``compute_gae``.
+    3. **Communication regularisation** (MAGIC) — when ``comm_reg_scale > 0``,
+       adds a binary-entropy loss on the off-diagonal adjacency density.
+       Pushes the Gumbel-Softmax topology away from the all-zero (no-comm)
+       and all-one (full-comm) collapse modes toward informative sparse graphs.
+       Gradient flows via the straight-through Gumbel-Softmax estimator.
     """
 
     sampled_advantages = (sampled_advantages - sampled_advantages.mean()) / (
         sampled_advantages.std() + 1e-8
     )
+
+    # Resolve at Python level so the conditional is not traced by JAX.
+    use_comm_reg = comm_reg_scale > 0.0
 
     def _policy_loss(params):
         _, next_log_prob, outputs = policy_act(
@@ -157,6 +166,29 @@ def _update_policy_fixed(
         entropy_loss = -entropy_loss_scale * entropy.mean()
 
         total_loss = policy_loss + entropy_loss
+
+        # Communication-topology regularisation (MAGIC §4.2).
+        # Binary entropy H(p) is maximised at p=0.5 (balanced comm graph).
+        # Minimising -H(p) penalises adjacency collapse to all-zero or all-one.
+        # Gradient flows through the straight-through Gumbel-Softmax estimator.
+        if use_comm_reg:
+            adj = outputs.get("adj_matrices", None)
+            if adj is not None:
+                n = adj.shape[-1]
+                off_diag = jnp.ones((n, n), dtype=jnp.float32) - jnp.eye(
+                    n, dtype=jnp.float32
+                )
+                num_off_diag = jnp.float32(n * n - n)
+                num_matrices = jnp.float32(adj.shape[0] * adj.shape[1])
+                density = jnp.sum(adj * off_diag[None, None, :, :]) / (
+                    num_matrices * num_off_diag
+                )
+                eps = jnp.float32(1e-6)
+                h = -(
+                    density * jnp.log(density + eps)
+                    + (1.0 - density) * jnp.log(1.0 - density + eps)
+                )
+                total_loss = total_loss - jnp.float32(comm_reg_scale) * h
 
         return total_loss, (entropy_loss, kl_divergence, entropy.mean())
 
@@ -226,6 +258,18 @@ class CategoricalMAPPO(MAPPO):
             self.checkpoint_modules[uid]["value_preprocessor"] = (
                 self._value_preprocessor[uid0]
             )
+
+        # For homogeneous agents (shared policy), also share the
+        # _state_preprocessor so all agents pool their obs into a single
+        # RunningStandardScaler instead of 4 separate scalers that each see
+        # only 1/N of the data.  Heterogeneous agents keep separate scalers
+        # since their obs spaces may differ in semantics.
+        if self._shared_policy:
+            for uid in self.possible_agents:
+                self._state_preprocessor[uid] = self._state_preprocessor[uid0]
+                self.checkpoint_modules[uid]["state_preprocessor"] = (
+                    self._state_preprocessor[uid0]
+                )
 
         # Create a SINGLE set of AdamW optimisers for the shared models.
         # With parameter sharing, all agents' data is pooled and
@@ -586,7 +630,7 @@ class CategoricalMAPPO(MAPPO):
         mean_entropy = jnp.float32(0.0)
         new_lr = self._learning_rate[uid0]
 
-        for epoch in range(self._learning_epochs[uid0]):
+        for _ in range(self._learning_epochs[uid0]):
             if kl_exceeded:
                 break
 
@@ -619,6 +663,7 @@ class CategoricalMAPPO(MAPPO):
                         self._ratio_clip[uid0],
                         effective_entropy_loss_scale,
                         self.cfg.get("debug_entropy_stats", False),
+                        self.cfg.get("comm_reg_scale", 0.0),
                     )
                 )
 
@@ -763,6 +808,7 @@ class CategoricalMAPPO(MAPPO):
                             self._ratio_clip[uid],
                             effective_entropy_loss_scale,
                             self.cfg.get("debug_entropy_stats", False),
+                            self.cfg.get("comm_reg_scale", 0.0),
                         )
                     )
 
