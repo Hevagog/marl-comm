@@ -1,16 +1,15 @@
 # fmt: off
-import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "magic_overcooked_marshmallow_experiment_coordination_v0",
-        "agent_type":       "magic",
+        "name":             "commformer_blindspot_v1",
+        "agent_type":       "commformer",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["magic", "overcooked"],
+            "tags":    ["commformer", "blindspot"],
         },
         "write_interval":      "auto",
         "checkpoint_interval": "auto",
@@ -18,13 +17,14 @@ CONFIG = {
     },
 
     "env": {
-        "id":                     "overcooked",
-        "num_envs":               1,             
-        "layout_name":            "marshmallow_experiment_coordination",
-        "horizon":                200,
-        "use_dense_obs":          False,
-        "reward_shaping":         True,
-        "reward_shaping_factor":  1.0,
+        "id":            "blindspot",
+        "num_envs":      1,
+        "grid_size":     9,
+        "max_cycles":    100,
+        "num_traps":     5,
+        "use_communication": False,  # Comm handled by CommFormer, not env tokens
+        "random_goal":   True,
+        "min_goal_start_distance": 4,
     },
 
     "training": {
@@ -44,7 +44,8 @@ CONFIG = {
         "fps":             4,
     },
 
-    "magic": {
+    # ---- CommFormer-specific PPO parameters ----
+    "commformer": {
         "rollouts":        4096,
         "learning_epochs": 8,
         "mini_batches":    4,
@@ -56,12 +57,12 @@ CONFIG = {
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
-        # cramped_room lossless obs = 5 * 4 * 26 = 520; shared = 1040.
-        # Update these sizes if you change layout or set use_dense_obs=True.
+        # obs_dim for BlindSpot (9×9, 2 agents, 5 traps): 8 + 5*3 + 2 = 25
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 1690},
+        "state_preprocessor_kwargs":         {"size": 25},
+        # shared_obs_dim = 50 (both agents' obs concatenated)
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 3380},
+        "shared_state_preprocessor_kwargs":  {"size": 50},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -73,33 +74,27 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale":       0.02,
-        "entropy_annealing":        True,
-        "entropy_loss_scale_start": 0.05,
-        "entropy_loss_scale_end":   0.01,
-        "debug_entropy_stats":      False,
-        "value_loss_scale":         1.0,
+        "entropy_loss_scale": 0.02,
+        "value_loss_scale":   1.0,
 
-        "kl_threshold":       0.05,
-        "kl_warmup_fraction": 0.3,
-        "debug_kl_stats":     False,
+        "kl_threshold": 0.05,
 
-        "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -5.0, 25.0),
+        "rewards_shaper":       None,
         "time_limit_bootstrap": True,
 
-        "weight_decay":            1e-4,
-        "linear_lr_decay":         True,
-        "lr_decay_start_fraction": 0.3,
-        "min_lr_fraction":         0.1,
+        "weight_decay":       1e-4,
 
-        "message_dim":        64,
-        "num_comm_rounds":    2,
-        "num_heads":          4,
-        "gumbel_temperature": 0.5,
+        # ---- CommFormer architecture hyperparameters ----
+        # Modest capacity for 2-agent navigation task.
+        "hidden_dim":  64,
+        "num_blocks":  1,
+        "num_heads":   1,
+        "head_dim":    64,
+        "mlp_dim":     128,
+        "sparsity":    0.4,  # k=1 for N=2: at least 1 neighbor (full comm)
     },
 
     "policy": {
-        "hidden_sizes":          [256, 256],
         "unnormalized_log_prob": True,
     },
 

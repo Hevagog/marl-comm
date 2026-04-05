@@ -4,7 +4,7 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "magic_blindspot_v2",
+        "name":             "magic_blindspot_v5",
         "agent_type":       "magic",
         "directory":        "runs",
         "wandb":            True,
@@ -19,11 +19,13 @@ CONFIG = {
 
     "env": {
         "id":            "blindspot",
-        "num_envs":      16,           
+        "num_envs":      1,           
         "grid_size":     9,
         "max_cycles":    100,
         "num_traps":     5,
         "use_communication": False, # Comm handled differentially by MAGIC, not env discrete messages
+        "random_goal":   True,
+        "min_goal_start_distance": 4,
     },
 
     "training": {
