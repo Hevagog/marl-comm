@@ -25,8 +25,20 @@ def _get_runner(agent_type: str):
         from agents.commformer.train import CommFormerRunner
 
         return CommFormerRunner
+    if agent_type == "mam":
+        from agents.mam.train import MAMRunner
+
+        return MAMRunner
+    if agent_type == "etmat":
+        from agents.etmat.train import ETMATRunner
+
+        return ETMATRunner
+    if agent_type == "mamhm":
+        from agents import MAMHMRunner
+
+        return MAMHMRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'etmat']}"
     )
 
 
@@ -136,8 +148,22 @@ def main() -> None:
         default=None,
         help="Path to checkpoint file.  Overrides cfg[eval/record][checkpoint_path].",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="CHECKPOINT",
+        help=(
+            "Resume training from CHECKPOINT.  Loads weights and infers the "
+            "starting timestep from the filename (e.g. agent_1000000.pickle → "
+            "1000000).  Only valid with --task train."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.resume is not None and args.task != "train":
+        parser.error("--resume is only valid with --task train")
 
     config_path = Path(args.config)
     sys.path.insert(0, str(config_path.parent))
@@ -179,7 +205,7 @@ def main() -> None:
 
     task: str = args.task
     if task == "train":
-        runner.train()
+        runner.train(resume_from=args.resume)
     elif task == "eval":
         runner.eval(checkpoint_path=args.checkpoint)
     elif task == "record":

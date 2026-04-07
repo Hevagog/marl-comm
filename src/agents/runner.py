@@ -54,11 +54,28 @@ class BaseRunner(ABC):
         agent_cfg["shared_state_preprocessor_kwargs"] = shared_state_kwargs
         return agent_cfg
 
-    def train(self) -> None:
-        """Run the full training loop."""
+    def train(self, resume_from: str | None = None) -> None:
+        import re
+
         train_cfg = self._cfg["training"]
+        total_timesteps: int = train_cfg["timesteps"]
+        initial_timestep: int = 0
+
+        if resume_from is not None:
+            self._load_checkpoint(resume_from)
+            stem = Path(resume_from).stem  # e.g. "agent_1000000"
+            m = re.search(r"_(\d+)$", stem)
+            if m:
+                initial_timestep = int(m.group(1))
+                print(f"Resuming from timestep {initial_timestep}")
+            else:
+                print(
+                    f"Warning: could not parse timestep from '{stem}'; "
+                    "starting counter from 0 but weights are loaded."
+                )
+
         trainer_cfg = {
-            "timesteps": train_cfg["timesteps"],
+            "timesteps": total_timesteps,
             "headless": True,
             "disable_progressbar": False,
         }
@@ -67,6 +84,7 @@ class BaseRunner(ABC):
             agents=self._agent,  # type: ignore[arg-type]
             cfg=trainer_cfg,
         )
+        trainer.initial_timestep = initial_timestep
         trainer.train()
 
     def eval(self, checkpoint_path: str | None = None) -> None:
@@ -144,6 +162,29 @@ class BaseRunner(ABC):
 
         env_cfg = self._cfg.get("env", {})
         env_id = env_cfg.get("id", "coingame")
+        agent_type = self._cfg.get("experiment", {}).get("agent_type", "mappo")
+
+        if agent_type == "commformer":
+            from utils.commformer_runner_integration import run_commformer_analysis
+
+            run_commformer_analysis(
+                self,
+                checkpoint_path,
+                n_episodes,
+                output_dir=f"{output_dir}/commformer",
+            )
+            return
+
+        if agent_type == "mamhm":
+            from utils.mamhm_runner_integration import run_mamhm_analysis
+
+            run_mamhm_analysis(
+                self,
+                checkpoint_path,
+                n_episodes,
+                output_dir=f"{output_dir}/mamhm",
+            )
+            return
 
         if env_id == "blindspot":
             from utils.blindspot_eval_analysis import BlindSpotEvalCollector
