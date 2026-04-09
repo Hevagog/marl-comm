@@ -175,6 +175,17 @@ class BaseRunner(ABC):
             )
             return
 
+        if agent_type == "commformerhm":
+            from utils.commformer_runner_integration import run_commformer_analysis
+
+            run_commformer_analysis(
+                self,
+                checkpoint_path,
+                n_episodes,
+                output_dir=f"{output_dir}/commformerhm",
+            )
+            return
+
         if agent_type == "mamhm":
             from utils.mamhm_runner_integration import run_mamhm_analysis
 
@@ -292,6 +303,19 @@ class BaseRunner(ABC):
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_highway_figures(data, output_dir=output_dir, prefix=exp_name)
+        elif env_id == "flatland":
+            from utils.flatland_eval_analysis import FlatlandEvalCollector
+            from utils.flatland_eval_visualizer import save_all_flatland_figures
+
+            collector = FlatlandEvalCollector(
+                num_agents=env_cfg.get("num_agents", len(self._env.possible_agents)),
+                max_steps_per_episode=env_cfg.get("max_episode_steps"),
+            )
+            data = collector.collect(
+                env=self._env, agent=self._agent, n_episodes=n_episodes
+            )
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_flatland_figures(data, output_dir=output_dir, prefix=exp_name)
         elif env_id == "warehouse":
             if self._cfg.get("experiment", {}).get("agent_type") == "magic":
                 from utils import (

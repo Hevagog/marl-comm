@@ -37,8 +37,12 @@ def _get_runner(agent_type: str):
         from agents import MAMHMRunner
 
         return MAMHMRunner
+    if agent_type == "commformerhm":
+        from agents.commformerhm.commformerhm_runner import CommFormerHMRunner
+
+        return CommFormerHMRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'etmat']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'etmat', 'mamhm', 'commformerhm']}"
     )
 
 
@@ -112,6 +116,17 @@ def _create_env_factory(
                 make_intersection_env, config=config, render_mode=render_mode
             )
 
+        case "flatland":
+            from environments import FlatlandConfig, make_flatland_env
+
+            config_kwargs = {
+                key: value
+                for key, value in env_cfg.items()
+                if key in FlatlandConfig.__dataclass_fields__
+            }
+            config = FlatlandConfig(**config_kwargs)
+            return partial(make_flatland_env, config=config, render_mode=render_mode)
+
         case "warehouse":
             from environments import make_warehouse_env, WarehouseConfig
 
@@ -125,7 +140,7 @@ def _create_env_factory(
 
         case _:
             raise ValueError(
-                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'warehouse']"
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'flatland', 'warehouse']"
             )
 
 
@@ -189,13 +204,12 @@ def main() -> None:
     env_id = env_cfg.get("id", "coingame")
 
     env_factory = _create_env_factory(env_id, env_cfg, mode)
-    if num_envs > 1:
-        from environments import make_vectorized_env
 
-        raw_env = make_vectorized_env(env_fn=env_factory, num_envs=num_envs)
+    from environments import make_vectorized_env
+
+    raw_env = make_vectorized_env(env_fn=env_factory, num_envs=num_envs)
+    if num_envs > 1:
         print(f"Created vectorized environment with {num_envs} parallel instances")
-    else:
-        raw_env = env_factory()
 
     env = wrap_env(raw_env, wrapper="pettingzoo")
 

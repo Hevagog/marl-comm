@@ -11,7 +11,7 @@ CONFIG = {
             "project": "marl-comm",
             "tags":    ["mam", "warehouse", "v4-hyperfix"],
         },
-        "write_interval":      "auto",
+        "write_interval":      25_000,
         "checkpoint_interval": 200000,
         "store_separately":    False,
     },

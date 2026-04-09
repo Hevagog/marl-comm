@@ -11,26 +11,21 @@ Architecture (single-pass scaled-dot-product attention over learnable prototypes
     V     = W_v · Xi                            # projected values (separate from keys)
     alpha = softmax(beta_scale · q @ K^T)
     m     = alpha @ V                           # memory retrieval
-    gate  = sigmoid(gate_logit)                 # learnable scalar gate (init ≈ 0)
-    h'    = h + gate · gamma · m                # gated residual update
+    gate  = sigmoid(W_gate · h_ln + b_gate)     # input-dependent gate
+    h'    = LN(h + gate · gamma · m)            # gated residual update
 
-
-**Learnable gate** (init near 0): At initialization, the memory patterns xi
-   are random. Without a gate, gamma·m injects noise that disrupts the MAM
-   backbone's learning (this caused v2's catastrophic regression). The gate
-   starts near 0 (sigmoid(-3) ≈ 0.05) and opens as the patterns become useful.
-
-**Separate W_v projection**: Per Ramsauer et al. Figure 5 (HopfieldLayer),
-   keys and values should be independently parameterized. Using raw xi as both
-   keys and values couples the lookup direction with the retrieved content,
-   limiting representational capacity.
-
-**Post-memory LayerNorm**: Stabilizes the output scale after the residual
-   addition, preventing drift in ||h'|| that could destabilize downstream layers.
+v5 changes vs v4:
+  - **Input-dependent gate**: replaces scalar gate_logit with Dense(1) projection
+    from h_ln. The gate now varies per agent per timestep, providing strong
+    gradient flow from the loss into the memory path. Bias initialized to
+    gate_init so the initial gate value matches the v4 starting point.
+  - **Diversity loss**: new method `diversity_loss()` returns mean squared cosine
+    similarity between prototype pairs. Added to PPO loss to directly drive
+    prototype specialization without relying on attenuated policy gradients.
 
 References
 ----------
-- Ramsauer et al. 2021 "Hopfield Networks is All You Need" (Fig. 5, §3)
+- Ramsauer et al. 2021 "Hopfield Networks is All You Need" (Fig. 5, S3)
 - Daniel et al. 2024 "Multi-Agent RL with Selective State-Space Models"
 """
 
@@ -55,31 +50,43 @@ class HopfieldMemoryBank(nn.Module):
     gamma : float
         Maximum residual scaling factor. Actual contribution is gate * gamma * m.
     gate_init : float
-        Initial logit for the learnable gate. sigmoid(gate_init) sets the
-        initial memory contribution fraction. Default -3.0 → sigmoid ≈ 0.047.
+        Initial bias for the gate projection. sigmoid(gate_init) sets the
+        initial memory contribution fraction. Default -2.0 -> sigmoid ~ 0.12.
     activation : str
         Attention activation: "softmax" (default) or "relu" (sparse).
     use_pre_ln : bool
         If True (default), apply LayerNorm to h before computing the query.
+    diversity_loss_scale : float
+        Weight for the prototype diversity regularization loss.
     """
 
     d_model: int
-    num_memories: int = 64
-    beta: float = 1.0
-    gamma: float = 0.1
-    gate_init: float = -3.0
+    num_memories: int = 16
+    beta: float = 1.5
+    gamma: float = 0.25
+    gate_init: float = -2.0
     activation: str = "softmax"
     use_pre_ln: bool = True
+    diversity_loss_scale: float = 0.01
 
     def setup(self) -> None:
-        # Query projection (h → q)
+        # Query projection (h -> q)
         self.W_q = nn.Dense(self.d_model, use_bias=False)
-        # Value projection (xi → v), separate from key space
+        # Value projection (xi -> v), separate from key space
         self.W_v = nn.Dense(self.d_model, use_bias=False)
         if self.use_pre_ln:
             self.pre_ln = nn.LayerNorm()
         # Post-memory LayerNorm for output stability
         self.post_ln = nn.LayerNorm()
+
+        # Input-dependent gate: Dense(1) with bias initialized to gate_init.
+        # This replaces the scalar gate_logit from v4 — the gate now varies
+        # per agent per timestep, giving the memory path strong gradients.
+        self.gate_proj = nn.Dense(
+            1,
+            kernel_init=nn.initializers.zeros,
+            bias_init=lambda _key, shape, _dtype=None: jnp.full(shape, self.gate_init),
+        )
 
         # Learnable memory patterns (num_memories, d_model)
         self.xi = self.param(
@@ -88,33 +95,64 @@ class HopfieldMemoryBank(nn.Module):
             (self.num_memories, self.d_model),
         )
 
-        # Learnable scalar gate — starts near 0 so memory is initially silent.
-        # This prevents random-init patterns from disrupting the MAM backbone.
-        self.gate_logit = self.param(
-            "gate_logit",
-            lambda _key, shape: jnp.full(shape, self.gate_init),
-            (1,),
-        )
-
         # Pre-compute scaled inverse temperature: beta / sqrt(d)
         self._beta_scale = self.beta / jnp.sqrt(
             jnp.asarray(self.d_model, dtype=jnp.float32)
         )
 
-    def _scores(self, h: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """Compute attention scores and projected values."""
-        h_in = self.pre_ln(h) if self.use_pre_ln else h
+    def _memory_keys(self) -> jax.Array:
+        return self.xi * jax.lax.rsqrt(
+            jnp.sum(jnp.square(self.xi), axis=-1, keepdims=True) + 1e-6
+        )
+
+    def _pre_norm(self, h: jax.Array) -> jax.Array:
+        return self.pre_ln(h) if self.use_pre_ln else h
+
+    def prepare_memory(self) -> tuple[jax.Array, jax.Array]:
+        """Pre-compute keys and values (no gate — gate is now input-dependent)."""
+        return (
+            self._memory_keys(),
+            self.W_v(self.xi),
+        )
+
+    def _scores(self, h: jax.Array, xi_keys: jax.Array) -> jax.Array:
+        h_in = self._pre_norm(h)
         q = self.W_q(h_in)  # (batch, n_agent, d_model)
+        return self._beta_scale * (q @ xi_keys.T)
 
-        # Unit-normalize memory patterns for stable key directions
-        xi_keys = self.xi / (jnp.linalg.norm(self.xi, axis=-1, keepdims=True) + 1e-6)
+    def _gate(self, h: jax.Array) -> jax.Array:
+        """Input-dependent gating: sigmoid(W_gate @ h_ln + b_gate)."""
+        h_in = self._pre_norm(h)
+        return jax.nn.sigmoid(self.gate_proj(h_in))  # (batch, n_agent, 1)
 
-        # Separate value projection (per Ramsauer Fig. 5)
-        xi_values = self.W_v(self.xi)  # (num_memories, d_model)
+    def _scores_and_gate(
+        self, h: jax.Array, xi_keys: jax.Array
+    ) -> tuple[jax.Array, jax.Array]:
+        """Compute attention scores and gate in one pre-norm call."""
+        h_in = self._pre_norm(h)  # compute LayerNorm once
+        scores = self._beta_scale * (self.W_q(h_in) @ xi_keys.T)
+        gate = jax.nn.sigmoid(self.gate_proj(h_in))
+        return scores, gate
 
-        # matmul: (batch, n_agent, d_model) @ (d_model, K) → (batch, n_agent, K)
-        scores = self._beta_scale * (q @ xi_keys.T)
-        return scores, xi_values
+    def apply_memory(
+        self,
+        h: jax.Array,
+        xi_keys: jax.Array,
+        xi_values: jax.Array,
+    ) -> jax.Array:
+        scores, gate = self._scores_and_gate(h, xi_keys)
+
+        if self.activation == "softmax":
+            alpha = jax.nn.softmax(scores, axis=-1)
+        elif self.activation == "relu":
+            alpha = nn.relu(scores)
+        else:
+            raise ValueError(
+                f"Unknown activation '{self.activation}'. Use 'softmax' or 'relu'."
+            )
+
+        m = alpha @ xi_values
+        return self.post_ln(h + gate * self.gamma * m)
 
     def __call__(self, h: jax.Array) -> jax.Array:
         """Memory-augmented forward pass.
@@ -129,28 +167,26 @@ class HopfieldMemoryBank(nn.Module):
         h_out : (batch, n_agent, d_model)
             Memory-augmented hidden states with gated residual + post-LN.
         """
-        scores, values = self._scores(h)
+        return self.apply_memory(h, *self.prepare_memory())
 
-        if self.activation == "softmax":
-            alpha = jax.nn.softmax(scores, axis=-1)
-        elif self.activation == "relu":
-            alpha = nn.relu(scores)
-        else:
-            raise ValueError(
-                f"Unknown activation '{self.activation}'. Use 'softmax' or 'relu'."
-            )
+    def diversity_loss(self) -> jax.Array:
+        """Prototype diversity regularization.
 
-        # matmul: (batch, n_agent, K) @ (K, d_model) → (batch, n_agent, d_model)
-        m = alpha @ values
-
-        # Gated residual: gate starts near 0, grows as patterns become useful
-        gate = jax.nn.sigmoid(self.gate_logit)  # scalar in (0, 1)
-        h_out = h + gate * self.gamma * m
-
-        return self.post_ln(h_out)
+        Returns mean squared cosine similarity between all pairs of prototypes.
+        Minimizing this encourages prototypes to occupy distinct directions,
+        preventing collapse where all queries retrieve the same pattern.
+        """
+        xi_norm = self.xi * jax.lax.rsqrt(
+            jnp.sum(jnp.square(self.xi), axis=-1, keepdims=True) + 1e-6
+        )
+        sim = xi_norm @ xi_norm.T  # (K, K)
+        # Upper triangle (exclude diagonal self-similarity)
+        mask = jnp.triu(jnp.ones_like(sim), k=1)
+        n_pairs = jnp.sum(mask)
+        return jnp.sum(mask * jnp.square(sim)) / jnp.maximum(n_pairs, 1.0)
 
     def get_memory_attention(self, h: jax.Array) -> jax.Array:
-        scores, _ = self._scores(h)
+        scores = self._scores(h, self._memory_keys())
         if self.activation == "softmax":
             return jax.nn.softmax(scores, axis=-1)
         return nn.relu(scores)

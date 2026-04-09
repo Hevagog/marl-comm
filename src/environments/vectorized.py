@@ -279,20 +279,24 @@ class VectorizedPettingZooEnv:
             for agent in self._possible_agents:
                 agent_actions = actions.get(agent)
                 if agent_actions is not None:
-                    # Handle lists, numpy arrays, and JAX arrays
-                    if isinstance(agent_actions, list):
+                    # Normalise to numpy (handles int, float, list, JAX arrays, etc.)
+                    if not isinstance(agent_actions, np.ndarray):
                         agent_actions = np.asarray(agent_actions)
-                    elif hasattr(agent_actions, "__array__"):
-                        agent_actions = np.asarray(agent_actions)
-
-                    # Flatten in case skrl wrapper adds extra dimensions
-                    agent_actions = agent_actions.flatten()
 
                     if agent_actions.ndim == 0:
+                        # Scalar: same action for all envs
                         env_actions[agent] = int(agent_actions)
                     elif agent_actions.ndim == 1:
-                        env_actions[agent] = int(agent_actions[i])
+                        if agent_actions.shape[0] == 1:
+                            # Single-element 1-D: broadcast to all envs
+                            env_actions[agent] = int(agent_actions[0])
+                        else:
+                            env_actions[agent] = int(agent_actions[i])
+                    elif agent_actions.ndim == 2 and agent_actions.shape[1] == 1:
+                        # (num_envs, 1) — discrete actions with an extra dim from skrl
+                        env_actions[agent] = int(agent_actions[i, 0])
                     else:
+                        # Continuous: (num_envs, action_dim)
                         env_actions[agent] = agent_actions[i]
                 else:
                     # Default action (0) if not provided
@@ -317,9 +321,11 @@ class VectorizedPettingZooEnv:
 
         # Handle auto-reset for terminated/truncated environments
         for i, (term, trunc) in enumerate(zip(terminated_list, truncated_list)):
-            # Check if any agent is done
-            any_done = any(term.values()) or any(trunc.values())
-            if any_done:
+            # Check if all agents are done
+            all_done = all(
+                term.get(a, False) or trunc.get(a, False) for a in self._possible_agents
+            )
+            if all_done:
                 # Auto-reset this environment
                 new_obs, _ = self._envs[i].reset()
                 obs_list[i] = new_obs
@@ -504,9 +510,6 @@ def make_vectorized_env(
     """
     if num_envs <= 0:
         raise ValueError(f"num_envs must be positive, got {num_envs}")
-
-    if num_envs == 1:
-        return env_fn()
 
     env_fns = [env_fn for _ in range(num_envs)]
     return VectorizedPettingZooEnv(env_fns)

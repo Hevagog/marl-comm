@@ -58,6 +58,10 @@ from skrl.models.jax import CategoricalMixin, Model
 
 from agents.shared.mamba_blocks import BiMamba, CrossMamba, FIFOBuffer, Mamba
 from agents.mamhm.models.hopfield_memory import HopfieldMemoryBank
+from agents.mamhm.models.task_hopfield import (
+    EntityHopfieldPooling,
+    TaskHopfieldPooling,
+)
 
 _HIDDEN_GAIN = jnp.sqrt(2.0)
 _OUTPUT_GAIN = 0.01
@@ -97,7 +101,12 @@ class EncodeBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    """BiMamba encoder: obs → obs_rep (identical to MAM)."""
+    """BiMamba encoder with optional upstream Hopfield pooling.
+
+    When use_task_hopfield=True, applies TaskHopfieldPooling to the task
+    queue features BEFORE the BiMamba blocks so the encoder reasons over
+    task-conditioned agent representations.
+    """
 
     obs_dim: int
     action_dim: int
@@ -107,6 +116,16 @@ class Encoder(nn.Module):
     d_state: int
     d_conv: int
     delta_rank: int
+
+    # Upstream Hopfield pooling flags
+    use_task_hopfield: bool = False
+    use_entity_hopfield: bool = False
+    task_hopfield_num_heads: int = 4
+    task_hopfield_beta: float = 2.0
+    task_hopfield_gate_init: float = -3.0
+    entity_hopfield_num_heads: int = 4
+    entity_hopfield_beta: float = 2.0
+    entity_hopfield_gate_init: float = -3.0
 
     def setup(self) -> None:
         self.obs_encoder = nn.Sequential(
@@ -129,9 +148,33 @@ class Encoder(nn.Module):
             ]
         )
 
+        # Upstream Hopfield modules (applied before BiMamba)
+        if self.use_task_hopfield:
+            self._task_hopfield = TaskHopfieldPooling(
+                d_model=self.n_embd,
+                num_query_heads=self.task_hopfield_num_heads,
+                beta=self.task_hopfield_beta,
+                gate_init=self.task_hopfield_gate_init,
+            )
+        if self.use_entity_hopfield:
+            self._entity_hopfield = EntityHopfieldPooling(
+                d_model=self.n_embd,
+                num_query_heads=self.entity_hopfield_num_heads,
+                beta=self.entity_hopfield_beta,
+                gate_init=self.entity_hopfield_gate_init,
+            )
+
     def __call__(self, obs: jax.Array) -> jax.Array:
         """obs: (batch, n_agent, obs_dim) → obs_rep: (batch, n_agent, n_embd)."""
         emb = self.obs_encoder(obs)
+
+        # Apply upstream Hopfield pooling to condition embeddings
+        # on task/entity context BEFORE the BiMamba encoder blocks.
+        if self.use_task_hopfield:
+            emb = self._task_hopfield(obs, emb)
+        if self.use_entity_hopfield:
+            emb = self._entity_hopfield(obs, emb)
+
         rep = self.blocks(self.ln(emb))
         return rep
 
@@ -205,10 +248,12 @@ class DecodeBlock(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Mamba decoder with Hopfield Memory Bank.
+    """Mamba decoder with optional Hopfield Memory Bank.
 
-    Key difference from MAM: after all decoder blocks, we apply a HopfieldMemoryBank
-    to augment the hidden representations with associative memory retrieval.
+    The post-decoder HopfieldMemoryBank is now optional (default: off).
+    When use_post_decoder_hopfield=False, the decoder outputs go directly
+    to the action head.  This allows upstream TaskHopfieldPooling (in the
+    encoder) to serve as the sole memory mechanism.
     """
 
     obs_dim: int
@@ -220,13 +265,15 @@ class Decoder(nn.Module):
     d_conv: int
     delta_rank: int
 
-    # Hopfield Memory Bank parameters
-    num_memories: int = 64
-    memory_beta: float = 1.0
-    memory_gamma: float = 0.1
-    memory_gate_init: float = -3.0
+    # Post-decoder Hopfield Memory Bank parameters (legacy, default off)
+    use_post_decoder_hopfield: bool = False
+    num_memories: int = 16
+    memory_beta: float = 1.5
+    memory_gamma: float = 0.25
+    memory_gate_init: float = -2.0
     memory_activation: str = "softmax"
     memory_use_pre_ln: bool = True
+    memory_diversity_loss_scale: float = 0.01
 
     def setup(self) -> None:
         self.action_encoder = nn.Sequential(
@@ -250,16 +297,18 @@ class Decoder(nn.Module):
             for i in range(self.n_block)
         ]
 
-        # Hopfield Memory Bank after decoder blocks
-        self.memory_bank = HopfieldMemoryBank(
-            d_model=self.n_embd,
-            num_memories=self.num_memories,
-            beta=self.memory_beta,
-            gamma=self.memory_gamma,
-            gate_init=self.memory_gate_init,
-            activation=self.memory_activation,
-            use_pre_ln=self.memory_use_pre_ln,
-        )
+        # Post-decoder Hopfield Memory Bank (legacy path, off by default)
+        if self.use_post_decoder_hopfield:
+            self.memory_bank = HopfieldMemoryBank(
+                d_model=self.n_embd,
+                num_memories=self.num_memories,
+                beta=self.memory_beta,
+                gamma=self.memory_gamma,
+                gate_init=self.memory_gate_init,
+                activation=self.memory_activation,
+                use_pre_ln=self.memory_use_pre_ln,
+                diversity_loss_scale=self.memory_diversity_loss_scale,
+            )
 
         self.head = nn.Sequential(
             [
@@ -283,10 +332,21 @@ class Decoder(nn.Module):
         for block in self.blocks:
             x = block(x, obs_rep)
 
-        # Apply Hopfield Memory Bank
-        x = self.memory_bank(x)
+        # Apply post-decoder Hopfield Memory Bank (legacy, optional)
+        if self.use_post_decoder_hopfield:
+            x = self.memory_bank(x)
 
         return self.head(x)
+
+    def prepare_memory_bank(self) -> tuple[jax.Array, jax.Array] | None:
+        if self.use_post_decoder_hopfield:
+            return self.memory_bank.prepare_memory()
+        return None
+
+    def memory_diversity_loss(self) -> jax.Array:
+        if self.use_post_decoder_hopfield:
+            return self.memory_bank.diversity_loss()
+        return jnp.array(0.0)
 
     def recurrent_step(
         self,
@@ -296,6 +356,7 @@ class Decoder(nn.Module):
         self_buf_all: jax.Array,
         cross_hs_all: jax.Array,
         cross_buf_all: jax.Array,
+        memory_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """Single-agent recurrent decode step.
 
@@ -337,8 +398,11 @@ class Decoder(nn.Module):
                 cross_hs_all = cross_hs_all.at[:, i].set(c_hs_new)
                 cross_buf_all = cross_buf_all.at[:, i].set(c_buf_new)
 
-        # Apply Hopfield Memory Bank (single step)
-        x = self.memory_bank(x)
+        if self.use_post_decoder_hopfield:
+            if memory_cache is None:
+                x = self.memory_bank(x)
+            else:
+                x = self.memory_bank.apply_memory(x, *memory_cache)
 
         logits = self.head(x)
         return logits, self_hs_all, self_buf_all, cross_hs_all, cross_buf_all
@@ -364,13 +428,22 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
     d_conv: int = 4
     delta_rank: int = 128
 
-    # Hopfield Memory Bank params
-    num_memories: int = 64
-    memory_beta: float = 1.0
-    memory_gamma: float = 0.1
-    memory_gate_init: float = -3.0
+    # Upstream Hopfield pooling params
+    use_task_hopfield: bool = False
+    use_entity_hopfield: bool = False
+    task_hopfield_num_heads: int = 4
+    task_hopfield_beta: float = 2.0
+    task_hopfield_gate_init: float = -3.0
+
+    # Post-decoder Hopfield Memory Bank params (legacy)
+    use_post_decoder_hopfield: bool = False
+    num_memories: int = 16
+    memory_beta: float = 1.5
+    memory_gamma: float = 0.25
+    memory_gate_init: float = -2.0
     memory_activation: str = "softmax"
     memory_use_pre_ln: bool = True
+    memory_diversity_loss_scale: float = 0.01
 
     def __init__(
         self,
@@ -382,12 +455,21 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
         d_state: int = 32,
         d_conv: int = 4,
         delta_rank: int = 128,
-        num_memories: int = 64,
-        memory_beta: float = 1.0,
-        memory_gamma: float = 0.1,
-        memory_gate_init: float = -3.0,
+        # Upstream Hopfield
+        use_task_hopfield: bool = False,
+        use_entity_hopfield: bool = False,
+        task_hopfield_num_heads: int = 4,
+        task_hopfield_beta: float = 2.0,
+        task_hopfield_gate_init: float = -3.0,
+        # Post-decoder Hopfield (legacy)
+        use_post_decoder_hopfield: bool = False,
+        num_memories: int = 16,
+        memory_beta: float = 1.5,
+        memory_gamma: float = 0.25,
+        memory_gate_init: float = -2.0,
         memory_activation: str = "softmax",
         memory_use_pre_ln: bool = True,
+        memory_diversity_loss_scale: float = 0.01,
         unnormalized_log_prob: bool = True,
         device=None,
         **kwargs: Any,
@@ -403,13 +485,22 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "d_conv", int(d_conv))
         object.__setattr__(self, "delta_rank", int(delta_rank))
 
-        # Hopfield Memory params
+        # Upstream Hopfield params
+        object.__setattr__(self, "use_task_hopfield", bool(use_task_hopfield))
+        object.__setattr__(self, "use_entity_hopfield", bool(use_entity_hopfield))
+        object.__setattr__(self, "task_hopfield_num_heads", int(task_hopfield_num_heads))
+        object.__setattr__(self, "task_hopfield_beta", float(task_hopfield_beta))
+        object.__setattr__(self, "task_hopfield_gate_init", float(task_hopfield_gate_init))
+
+        # Post-decoder Hopfield Memory params (legacy)
+        object.__setattr__(self, "use_post_decoder_hopfield", bool(use_post_decoder_hopfield))
         object.__setattr__(self, "num_memories", int(num_memories))
         object.__setattr__(self, "memory_beta", float(memory_beta))
         object.__setattr__(self, "memory_gamma", float(memory_gamma))
         object.__setattr__(self, "memory_gate_init", float(memory_gate_init))
         object.__setattr__(self, "memory_activation", str(memory_activation))
         object.__setattr__(self, "memory_use_pre_ln", bool(memory_use_pre_ln))
+        object.__setattr__(self, "memory_diversity_loss_scale", float(memory_diversity_loss_scale))
 
     def setup(self) -> None:
         obs_dim = self.observation_space.shape[0]
@@ -424,15 +515,24 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
             d_conv=self.d_conv,
             delta_rank=self.delta_rank,
         )
-        self._encoder = Encoder(**kw)
+        self._encoder = Encoder(
+            **kw,
+            use_task_hopfield=self.use_task_hopfield,
+            use_entity_hopfield=self.use_entity_hopfield,
+            task_hopfield_num_heads=self.task_hopfield_num_heads,
+            task_hopfield_beta=self.task_hopfield_beta,
+            task_hopfield_gate_init=self.task_hopfield_gate_init,
+        )
         self._decoder = Decoder(
             **kw,
+            use_post_decoder_hopfield=self.use_post_decoder_hopfield,
             num_memories=self.num_memories,
             memory_beta=self.memory_beta,
             memory_gamma=self.memory_gamma,
             memory_gate_init=self.memory_gate_init,
             memory_activation=self.memory_activation,
             memory_use_pre_ln=self.memory_use_pre_ln,
+            memory_diversity_loss_scale=self.memory_diversity_loss_scale,
         )
 
     def __call__(self, inputs: Mapping[str, Any], role: str = ""):
@@ -494,11 +594,8 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
         """
         d_inner = self.n_embd * 2  # expand=2
         decoder = self._decoder
-
-        # Pre-slice obs_rep per agent: (n, groups, 1, n_embd)
-        obs_rep_per_agent = jnp.stack(
-            [obs_rep[:, i : i + 1, :] for i in range(n)], axis=0
-        )
+        memory_cache = decoder.prepare_memory_bank()
+        obs_rep_per_agent = jnp.swapaxes(obs_rep, 0, 1)[:, :, None, :]
 
         # Init recurrent state for decoder
         hs_shape = (groups, self.n_block, 1, d_inner, self.d_state)
@@ -521,7 +618,13 @@ class MAMHMPolicyNet(CategoricalMixin, Model):
             self_hs, self_buf, cross_hs, cross_buf, rng, cur_shifted = carry
 
             logits_i, self_hs, self_buf, cross_hs, cross_buf = decoder.recurrent_step(
-                cur_shifted, obs_rep_i, self_hs, self_buf, cross_hs, cross_buf
+                cur_shifted,
+                obs_rep_i,
+                self_hs,
+                self_buf,
+                cross_hs,
+                cross_buf,
+                memory_cache,
             )
             logits_i = logits_i.squeeze(1)  # (groups, act_dim)
 

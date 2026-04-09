@@ -45,13 +45,12 @@ def compute_rewards(
     rewards += pick_success.astype(np.float32) * config.reward_pick
     rewards += treat_complete.astype(np.float32) * config.reward_treatment_complete
 
-    # --- delivery: global bonus + individual ---
-    num_deliveries = delivery_success.sum()
-    num_active = state.agent.active.sum()
-    if num_active > 0:
-        global_bonus = num_deliveries * config.reward_delivery / num_active
-        rewards += active_f * global_bonus
-
+    # --- delivery reward ---
+    # Design choice: pure individual reward. The delivering agent receives
+    # the full reward_delivery; non-delivering agents receive nothing for
+    # this component. This avoids the prior bug (WH-B01) where both a global
+    # team bonus AND an individual bonus were applied, effectively doubling
+    # the nominal reward_delivery per successful delivery.
     rewards += delivery_success.astype(np.float32) * config.reward_delivery
     rewards += repair_rescue_success.astype(np.float32) * config.reward_rescue_repair
     rewards += charge_rescue_success.astype(np.float32) * config.reward_rescue_charge
@@ -68,6 +67,7 @@ def compute_rewards(
         rewards += delivery_success.astype(np.float32) * urgency_bonus
 
     # --- team penalty for expired tasks ---
+    num_active = state.agent.active.sum()
     if config.enable_task_deadlines and expired_tasks > 0 and num_active > 0:
         per_agent_penalty = (expired_tasks * config.penalty_task_expired) / num_active
         rewards += active_f * per_agent_penalty

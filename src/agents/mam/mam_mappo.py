@@ -128,13 +128,4 @@ class MAMMAPPO(CategoricalMAPPO):
 
         so each consecutive block of N rows is a valid agent group.
         """
-        n = len(self.possible_agents)
-        M = buffer_size // n  # timesteps per agent
-
-        ts_perm = np.random.permutation(M)
-
-        paired = np.empty(buffer_size, dtype=np.intp)
-        for a in range(n):
-            paired[a::n] = ts_perm + a * M
-
-        return paired
+        return self._shuffle_grouped_buffer_indices(buffer_size)

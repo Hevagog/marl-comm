@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import functools
 import pickle
 
@@ -78,32 +77,40 @@ def _jit_compute_gae_no_norm(
     discount_factor: float = 0.99,
     lambda_coefficient: float = 0.95,
 ) -> tuple[jax.Array, jax.Array]:
-    """GAE without buffer-level advantage normalisation (JIT version)."""
-    advantage = 0
-    advantages = jnp.zeros_like(rewards)
-    not_dones = jnp.logical_not(dones)
-    memory_size = rewards.shape[0]
-    for i in reversed(range(memory_size)):
-        _next_values = values[i + 1] if i < memory_size - 1 else next_values
-        advantage = (
-            rewards[i]
-            - values[i]
-            + discount_factor
-            * not_dones[i]
-            * (_next_values + lambda_coefficient * advantage)
-        )
-        # Squeeze to match the target shape — next_values may be (1,1)
-        # from the value function, causing advantage to broadcast to (1,1)
-        # while advantages[i] expects shape (1,).
-        advantage = advantage.squeeze()
-        advantages = advantages.at[i].set(advantage)
+    """GAE without buffer-level advantage normalisation (JIT version).
+
+    Uses jax.lax.scan instead of an unrolled Python loop so that JIT
+    compilation cost is O(1) in the buffer length rather than O(T).
+    """
+    not_dones = jnp.logical_not(dones).astype(rewards.dtype)
+
+    # next-step bootstrap values: [values[1], ..., values[T-1], next_values]
+    # Shape matches values: (T, feature_dim)
+    all_next_v = jnp.concatenate(
+        [values[1:], next_values.reshape(1, *values.shape[1:])], axis=0
+    )
+
+    def _step(carry_adv, x):
+        r, nd, v, nv = x
+        adv = r - v + discount_factor * nd * (nv + lambda_coefficient * carry_adv)
+        return adv, adv
+
+    # Reverse the time axis so scan processes T-1 → 0
+    xs = jax.tree.map(lambda a: jnp.flip(a, axis=0), (rewards, not_dones, values, all_next_v))
+    _, adv_rev = jax.lax.scan(_step, jnp.zeros_like(values[0]), xs)
+    advantages = jnp.flip(adv_rev, axis=0)
     returns = advantages + values
     return returns, advantages
 
 
 @functools.partial(
     jax.jit,
-    static_argnames=("policy_act", "debug_entropy", "comm_reg_scale"),
+    static_argnames=(
+        "policy_act",
+        "debug_entropy",
+        "comm_reg_scale",
+        "diversity_loss_scale",
+    ),
 )
 def _update_policy_fixed(
     policy_act,
@@ -113,9 +120,10 @@ def _update_policy_fixed(
     sampled_log_prob,
     sampled_advantages,
     ratio_clip,
-    entropy_loss_scale,  # FIX B-02: now a traced arg (was static, caused recompilation)
+    entropy_loss_scale,
     debug_entropy,
     comm_reg_scale=0.0,
+    diversity_loss_scale=0.0,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
 
@@ -138,6 +146,7 @@ def _update_policy_fixed(
 
     # Resolve at Python level so the conditional is not traced by JAX.
     use_comm_reg = comm_reg_scale > 0.0
+    use_diversity_reg = diversity_loss_scale > 0.0
 
     def _policy_loss(params):
         _, next_log_prob, outputs = policy_act(
@@ -189,6 +198,23 @@ def _update_policy_fixed(
                     + (1.0 - density) * jnp.log(1.0 - density + eps)
                 )
                 total_loss = total_loss - jnp.float32(comm_reg_scale) * h
+
+        # Hopfield memory prototype diversity regularization (MAMHM only).
+        # Penalises high cosine similarity between prototype pairs to prevent
+        # collapse where all queries retrieve the same pattern.
+        if use_diversity_reg:
+            decoder_params = params.get("params", {}).get("_decoder", {})
+            mb_params = decoder_params.get("memory_bank", {})
+            xi = mb_params.get("xi", None)
+            if xi is not None:
+                xi_norm = xi * jax.lax.rsqrt(
+                    jnp.sum(jnp.square(xi), axis=-1, keepdims=True) + 1e-6
+                )
+                sim = xi_norm @ xi_norm.T
+                mask = jnp.triu(jnp.ones_like(sim), k=1)
+                n_pairs = jnp.sum(mask)
+                div_loss = jnp.sum(mask * jnp.square(sim)) / jnp.maximum(n_pairs, 1.0)
+                total_loss = total_loss + diversity_loss_scale * div_loss
 
         return total_loss, (entropy_loss, kl_divergence, entropy.mean())
 
@@ -300,11 +326,17 @@ class CategoricalMAPPO(MAPPO):
                     scale=False,
                 )
                 # Point all per-agent optimizer slots to the shared instances.
+                # BUG-C-001 fix: do NOT register optimizers in checkpoint_modules.
+                # skrl's write_checkpoint calls flax.serialization.to_bytes() on
+                # every module in checkpoint_modules, which internally uses msgpack
+                # with strict_types=True.  The optax state inside AdamW contains
+                # Python tuples (ScaleByAdamState, EmptyState) that msgpack cannot
+                # serialise, causing a TypeError at the first checkpoint save.
+                # The load() override ignores optimizer state anyway, so registering
+                # optimizers here provides no benefit.
                 for uid in self.possible_agents:
                     self.policy_optimizer[uid] = shared_policy_opt
                     self.value_optimizer[uid] = shared_value_opt
-                    self.checkpoint_modules[uid]["policy_optimizer"] = shared_policy_opt
-                    self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
         else:
             # Heterogeneous: per-agent policy optimizer; shared value optimizer.
             shared_value_opt = AdamW(
@@ -326,10 +358,8 @@ class CategoricalMAPPO(MAPPO):
                     )
                     self.policy_optimizer[uid] = per_agent_policy_opt
                     self.value_optimizer[uid] = shared_value_opt
-                    self.checkpoint_modules[uid]["policy_optimizer"] = (
-                        per_agent_policy_opt
-                    )
-                    self.checkpoint_modules[uid]["value_optimizer"] = shared_value_opt
+                    # BUG-C-001 fix: optimizers not registered in checkpoint_modules
+                    # (see shared-policy branch above for full explanation).
 
     def load(self, path: str) -> None:
         """Load checkpoint, fixing skrl JAX multi-agent ``load()`` bug.
@@ -488,6 +518,13 @@ class CategoricalMAPPO(MAPPO):
         """
         return np.random.permutation(buffer_size)
 
+    def _shuffle_grouped_buffer_indices(self, buffer_size: int) -> np.ndarray:
+        n = len(self.possible_agents)
+        timesteps_per_agent = buffer_size // n
+        timestep_perm = np.random.permutation(timesteps_per_agent)
+        offsets = np.arange(n, dtype=np.intp)[:, None] * timesteps_per_agent
+        return (timestep_perm[None, :] + offsets).T.reshape(-1)
+
     def _update(self, timestep: int, timesteps: int) -> None:  # noqa: C901
         uid0 = self.possible_agents[0]
         value = self.values[uid0]  # always shared value
@@ -635,22 +672,17 @@ class CategoricalMAPPO(MAPPO):
                 break
 
             _indices = self._shuffle_buffer_indices(buffer_size)
-            sampled_batches = [
-                tuple(t[_indices[i : i + batch_size]] for t in pooled_list)
-                for i in range(0, buffer_size, batch_size)
-            ]
-
-            kl_divergences: list[float] = []
-
-            for (
-                sampled_states,
-                sampled_shared_states,
-                sampled_actions,
-                sampled_log_prob,
-                sampled_values,
-                sampled_returns,
-                sampled_advantages,
-            ) in sampled_batches:
+            for i in range(0, buffer_size, batch_size):
+                idx = _indices[i : i + batch_size]
+                (
+                    sampled_states,
+                    sampled_shared_states,
+                    sampled_actions,
+                    sampled_log_prob,
+                    sampled_values,
+                    sampled_returns,
+                    sampled_advantages,
+                ) = (t[idx] for t in pooled_list)
                 # --- Policy update ---
                 grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
                     _update_policy_fixed(
@@ -664,10 +696,9 @@ class CategoricalMAPPO(MAPPO):
                         effective_entropy_loss_scale,
                         self.cfg.get("debug_entropy_stats", False),
                         self.cfg.get("comm_reg_scale", 0.0),
+                        self.cfg.get("diversity_loss_scale", 0.0),
                     )
                 )
-
-                kl_divergences.append(kl_divergence.item())
 
                 if (
                     apply_kl_stop
@@ -788,8 +819,6 @@ class CategoricalMAPPO(MAPPO):
 
                 uid_indices = self._shuffle_buffer_indices(buf_size)
 
-                kl_divergences: list[float] = []
-
                 for i in range(0, buf_size, batch_size):
                     idx = uid_indices[i : i + batch_size]
                     sampled_states = tensors["states"][idx]
@@ -809,10 +838,9 @@ class CategoricalMAPPO(MAPPO):
                             effective_entropy_loss_scale,
                             self.cfg.get("debug_entropy_stats", False),
                             self.cfg.get("comm_reg_scale", 0.0),
+                            self.cfg.get("diversity_loss_scale", 0.0),
                         )
                     )
-
-                    kl_divergences.append(kl_divergence.item())
 
                     if (
                         apply_kl_stop

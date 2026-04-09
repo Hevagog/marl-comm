@@ -3,13 +3,13 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mamhm_warehouse_v4",
+        "name":             "mamhm_warehouse_v6",
         "agent_type":       "mamhm",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["mamhm", "warehouse", "v4-gated-hopfield"],
+            "tags":    ["mamhm", "warehouse", "v6-adaptive-gate-diversity"],
         },
         "write_interval":      25000,
         "checkpoint_interval": 200000,
@@ -153,35 +153,53 @@ CONFIG = {
         "delta_rank":  16,
 
         # ---- Hopfield Memory Bank hyperparameters ----
-        # v2→v3: Major architectural fix — learnable gate + W_v projection.
+        # v4→v5: Two architectural fixes for gradient starvation.
         #
-        # v2 regression root cause: gamma=0.15 + beta=4.0 on random-init
-        # memory patterns injected ~15% noise into the decoder output,
-        # preventing the MAM backbone from learning (reward stuck at -60).
+        # v4 root cause: scalar gate barely opened (0.12, 1.2% contribution),
+        # causing only 2/32 prototypes to activate (winner-take-all collapse).
+        # The memory bank was functionally a learned constant bias.
         #
-        # v3 fixes:
-        # 1. Keep the gate small but not effectively frozen at init.
-        #    The saved v3 eval plots show near-uniform memory usage
-        #    (effective K≈63/64) and a gate that barely moved from init,
-        #    so we slightly raise the initial contribution to improve signal.
-        # 2. Separate W_v projection (per Ramsauer et al. Fig. 5) decouples
-        #    key lookup direction from retrieved content.
-        # 3. Post-memory LayerNorm stabilizes output scale.
-        # Fewer slots encourage prototype reuse/specialisation on warehouse,
-        # instead of spreading attention almost uniformly over 64 slots.
-        "num_memories":         32,
-        # Slightly sharper retrieval than v3 to move away from the global-
-        # averaging regime seen in the saved attention-entropy plots.
-        "memory_beta":          3.0,
-        # Raise the max residual a bit so useful memories can matter once
-        # learned, while remaining far below the ungated v2 regime.
-        "memory_gamma":         0.15,
-        # sigmoid(-2.2)≈0.10, so the initial effective contribution is about
-        # 1.5% (0.10 * 0.15): still small, but no longer so tiny that the
-        # memory path struggles to get gradient on warehouse.
-        "memory_gate_init":     -2.2,
+        # v5 fixes:
+        # 1. Input-dependent gate: Dense(1)(h_ln) replaces scalar gate_logit.
+        #    Gate now varies per agent per timestep with strong gradient flow.
+        # 2. Prototype diversity loss: cosine similarity penalty directly
+        #    drives prototype specialisation without relying on attenuated
+        #    policy gradients through the gate.
+        # 3. Softer beta (1.5 vs 3.0) prevents winner-take-all collapse.
+        # 4. Fewer prototypes (16) with diversity loss → better specialisation.
+        "num_memories":         16,
+        # Softer retrieval — let diversity loss drive specialization rather
+        # than forcing it via high temperature.
+        "memory_beta":          1.5,
+        # Max contribution scale. Effective initial noise = sigmoid(gate_init) * gamma.
+        # v4 effective: sigmoid(-2.2) * 0.15 = 1.8%. Target ≤ 2% to not disrupt
+        # MAM backbone bootstrap. At gate_init=-3.0: sigmoid(-3)*0.25 = 1.2%. ✓
+        # NOTE: Do NOT set gamma=0.25 with gate_init=-2.0 — that gives 3.0% initial
+        # noise, which delayed v5 breakout by ~125k steps vs v4.
+        "memory_gamma":         0.25,
+        # sigmoid(-3.0) ≈ 0.047, initial contribution = 0.047 * 0.25 = 1.2%.
+        # Matches v4's effective starting noise while keeping the adaptive gate.
+        # The gate kernel (zero-init) will differentiate once training stabilises.
+        # (v5 used -2.0 → 3.0% initial noise → ~125k slower breakout than v4.)
+        "memory_gate_init":     -3.0,
         "memory_activation":    "softmax",
         "memory_use_pre_ln":    True,
+        # Prototype diversity regularization — penalises cosine similarity
+        # between prototype pairs to prevent collapse.
+        "diversity_loss_scale": 0.01,
+
+        # ---- Upstream Hopfield pooling (Change 1) ----
+        # Task Hopfield: pools task-queue features before BiMamba encoder.
+        # This replaces the post-decoder bank as the primary memory mechanism.
+        "use_task_hopfield":        True,
+        "use_entity_hopfield":      False,
+        "use_post_decoder_hopfield": False,    # legacy path, off by default
+        "task_hopfield_num_heads":  4,
+        "task_hopfield_beta":       2.0,
+        "task_hopfield_gate_init":  -3.0,
+
+        # ---- Structured critic (Change 2) ----
+        "use_structured_critic":    True,
     },
 
     "policy": {

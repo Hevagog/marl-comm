@@ -4,6 +4,7 @@ from environments.gridworld import (
     CoinGameConfig,
     BlindSpotConfig,
 )
+from environments.flatland import FlatlandConfig, make_flatland_env
 from environments.highway import make_intersection_env, IntersectionConfig
 from environments.overcooked import make_overcooked_env, OvercookedConfig
 from environments.vectorized import (
@@ -17,6 +18,8 @@ __all__ = [
     "CoinGameConfig",
     "make_blind_spot_env",
     "BlindSpotConfig",
+    "FlatlandConfig",
+    "make_flatland_env",
     "make_overcooked_env",
     "OvercookedConfig",
     "make_intersection_env",

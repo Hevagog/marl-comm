@@ -147,7 +147,8 @@ def get_agent_observation(
 
     stranded = _stranded_mask(state)
 
-    # ------ other agents (5 features each) ------
+    # ------ other agents (5 or 6 features each) ------
+    _n_other = 6 if config.enable_battery else 5
     for i in range(config.max_agents):
         if i == agent_idx:
             continue
@@ -157,7 +158,7 @@ def get_agent_observation(
             if config.comm_range is not None:
                 dist = abs(int(other_pos[0]) - row) + abs(int(other_pos[1]) - col)
                 if dist > config.comm_range:
-                    features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+                    features.extend([0.0] * _n_other)
                     continue
             features.extend(
                 [
@@ -168,8 +169,12 @@ def get_agent_observation(
                     float(stranded[i]),
                 ]
             )
+            if config.enable_battery:
+                features.append(
+                    state.agent.battery[i] / max(config.battery_capacity, 1)
+                )
         else:
-            features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+            features.extend([0.0] * _n_other)
 
     # ------  own heterogeneous properties (3 features) ------
     if config.enable_heterogeneous:
@@ -186,6 +191,24 @@ def get_agent_observation(
         features.append(
             state.agent.battery[agent_idx] / max(config.battery_capacity, 1)
         )
+
+    # ------  task queue context (3 features) ------
+    if config.enable_task_deadlines:
+        features.append(len(state.task_queue) / max(config.max_pending_tasks, 1))
+        if state.task_queue:
+            most_urgent = max(
+                state.task_queue,
+                key=lambda t: t.priority / max(t.deadline - state.step_count, 1),
+            )
+            shelf_pos = state.grid.shelf_positions[most_urgent.shelf_idx]
+            features.extend(
+                [
+                    (int(shelf_pos[0]) - row) / H,
+                    (int(shelf_pos[1]) - col) / W,
+                ]
+            )
+        else:
+            features.extend([0.0, 0.0])
 
     # ------ assemble & apply noise ------
     obs = np.array(features, dtype=np.float32)
@@ -227,12 +250,15 @@ def compute_obs_dim(config: WarehouseConfig) -> int:
     vr = config.vision_range
     view_size = 2 * vr + 1
     local_grid = view_size * view_size * 6
-    other_agents = (config.max_agents - 1) * 5
+    other_agent_features = 6 if config.enable_battery else 5
+    other_agents = (config.max_agents - 1) * other_agent_features
     dim = own_state + relative_pos + local_grid + other_agents
     if config.enable_heterogeneous:
         dim += 3
     if config.enable_battery:
         dim += 1
+    if config.enable_task_deadlines:
+        dim += 3  # pending_ratio + dx_urgent + dy_urgent
     return dim
 
 

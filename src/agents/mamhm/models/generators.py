@@ -7,6 +7,7 @@ import numpy as np
 
 from agents.mamhm.models.policy import MAMHMPolicyNet
 from agents.mamhm.models.value import MAMHMValueNet
+from agents.mamhm.models.structured_value import StructuredValueNet
 
 
 def create_mamhm_models(
@@ -44,6 +45,20 @@ def create_mamhm_models(
     memory_gate_init: float = mamhm_cfg.get("memory_gate_init", -3.0)
     memory_activation: str = mamhm_cfg.get("memory_activation", "softmax")
     memory_use_pre_ln: bool = mamhm_cfg.get("memory_use_pre_ln", True)
+    memory_diversity_loss_scale: float = mamhm_cfg.get("diversity_loss_scale", 0.01)
+
+    # Upstream Hopfield pooling
+    use_task_hopfield: bool = mamhm_cfg.get("use_task_hopfield", False)
+    use_entity_hopfield: bool = mamhm_cfg.get("use_entity_hopfield", False)
+    task_hopfield_num_heads: int = mamhm_cfg.get("task_hopfield_num_heads", 4)
+    task_hopfield_beta: float = mamhm_cfg.get("task_hopfield_beta", 2.0)
+    task_hopfield_gate_init: float = mamhm_cfg.get("task_hopfield_gate_init", -3.0)
+
+    # Post-decoder Hopfield (legacy)
+    use_post_decoder_hopfield: bool = mamhm_cfg.get("use_post_decoder_hopfield", False)
+
+    # Structured critic
+    use_structured_critic: bool = mamhm_cfg.get("use_structured_critic", False)
 
     first_agent = possible_agents[0]
     obs_space = observation_spaces[first_agent]
@@ -71,20 +86,35 @@ def create_mamhm_models(
         d_state=d_state,
         d_conv=d_conv,
         delta_rank=delta_rank,
+        # Upstream Hopfield
+        use_task_hopfield=use_task_hopfield,
+        use_entity_hopfield=use_entity_hopfield,
+        task_hopfield_num_heads=task_hopfield_num_heads,
+        task_hopfield_beta=task_hopfield_beta,
+        task_hopfield_gate_init=task_hopfield_gate_init,
+        # Post-decoder Hopfield (legacy)
+        use_post_decoder_hopfield=use_post_decoder_hopfield,
         num_memories=num_memories,
         memory_beta=memory_beta,
         memory_gamma=memory_gamma,
         memory_gate_init=memory_gate_init,
         memory_activation=memory_activation,
         memory_use_pre_ln=memory_use_pre_ln,
+        memory_diversity_loss_scale=memory_diversity_loss_scale,
         unnormalized_log_prob=unnormalized_log_prob,
     )
 
-    shared_value = MAMHMValueNet(
-        observation_space=expanded_shared_obs_space,
-        action_space=act_space,
-        hidden_sizes=hidden_sizes_value,
-    )
+    if use_structured_critic:
+        shared_value = StructuredValueNet(
+            observation_space=expanded_shared_obs_space,
+            action_space=act_space,
+        )
+    else:
+        shared_value = MAMHMValueNet(
+            observation_space=expanded_shared_obs_space,
+            action_space=act_space,
+            hidden_sizes=hidden_sizes_value,
+        )
 
     shared_policy.init_state_dict(role="policy")
     shared_value.init_state_dict(role="value")
