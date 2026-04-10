@@ -96,7 +96,9 @@ def _jit_compute_gae_no_norm(
         return adv, adv
 
     # Reverse the time axis so scan processes T-1 → 0
-    xs = jax.tree.map(lambda a: jnp.flip(a, axis=0), (rewards, not_dones, values, all_next_v))
+    xs = jax.tree.map(
+        lambda a: jnp.flip(a, axis=0), (rewards, not_dones, values, all_next_v)
+    )
     _, adv_rev = jax.lax.scan(_step, jnp.zeros_like(values[0]), xs)
     advantages = jnp.flip(adv_rev, axis=0)
     returns = advantages + values
@@ -360,6 +362,16 @@ class CategoricalMAPPO(MAPPO):
                     self.value_optimizer[uid] = shared_value_opt
                     # BUG-C-001 fix: optimizers not registered in checkpoint_modules
                     # (see shared-policy branch above for full explanation).
+
+        # BUG-C-001 fix (cont): MAPPO.__init__ (called via super().__init__() above)
+        # already registered skrl Adam optimizers in checkpoint_modules BEFORE we
+        # replaced them with AdamW instances. Those Adam optimizers contain Optax
+        # state tuples (ScaleByAdamState, EmptyState) that msgpack cannot serialise,
+        # causing `TypeError: can not serialize 'tuple' object` at the first
+        # checkpoint save. Remove them here so write_checkpoint never sees them.
+        for uid in self.possible_agents:
+            self.checkpoint_modules[uid].pop("policy_optimizer", None)
+            self.checkpoint_modules[uid].pop("value_optimizer", None)
 
     def load(self, path: str) -> None:
         """Load checkpoint, fixing skrl JAX multi-agent ``load()`` bug.
