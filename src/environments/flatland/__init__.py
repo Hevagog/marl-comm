@@ -53,12 +53,20 @@ from .config import (
     flatland_state_dim,
     flatland_tree_node_count,
 )
+from .curriculum import (
+    FLATLAND_CURRICULUM,
+    CurriculumScheduler,
+    CurriculumStage,
+)
 from .flatland_env import FlatlandPettingZooEnv, make_flatland_env
 
 __all__ = [
     "TREE_BRANCHING_FACTOR",
     "TREE_FEATURE_DIM",
     "FLATLAND_STATUS_DIM",
+    "FLATLAND_CURRICULUM",
+    "CurriculumScheduler",
+    "CurriculumStage",
     "FlatlandConfig",
     "FlatlandPettingZooEnv",
     "flatland_tree_node_count",

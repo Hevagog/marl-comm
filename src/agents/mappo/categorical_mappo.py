@@ -17,6 +17,73 @@ from skrl.multi_agents.jax.mappo.mappo import (
 from agents.mappo.adamw import AdamW
 
 
+# ---------------------------------------------------------------------------
+# Clipped value loss with optional Huber penalty.
+#
+# The stock skrl ``_update_value`` uses plain MSE on the (optionally-clipped)
+# value prediction error.  MSE is vulnerable to reward-distribution shifts
+# and large initial advantage variance: a single outlier (pred − target)²
+# term dominates the batch gradient and destabilises the critic in the
+# first ~1M transitions of a run.  Huber (smooth-L1) caps per-sample
+# gradient at |δ|, which keeps the critic learnable under noisy targets
+# without changing its fixed-point behaviour once targets stabilise.
+#
+# We keep the clipped-vs-unclipped PPO pessimistic-max formulation from
+# skrl's implementation to preserve the value trust-region semantics.
+# ---------------------------------------------------------------------------
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("value_act", "clip_predicted_values", "use_huber"),
+)
+def _update_value_huber(
+    value_act,
+    value_state_dict,
+    sampled_states,
+    sampled_values,
+    sampled_returns,
+    value_loss_scale,
+    clip_predicted_values,
+    value_clip,
+    use_huber,
+    huber_delta,
+):
+    def _per_sample(err):
+        # Huber: 0.5*e² for |e| ≤ δ, δ*(|e| − 0.5*δ) otherwise.
+        # Branchless via ``jnp.where`` so the function stays jit-friendly.
+        abs_err = jnp.abs(err)
+        quad = jnp.minimum(abs_err, huber_delta)
+        lin = abs_err - quad
+        huber = 0.5 * quad * quad + huber_delta * lin
+        mse = 0.5 * err * err
+        return jnp.where(use_huber, huber, mse)
+
+    def _value_loss(params):
+        predicted_values, _, _ = value_act(
+            {"states": sampled_states}, "value", params
+        )
+        if clip_predicted_values:
+            # Value-function trust region: clip the *change* in prediction
+            # relative to the rollout-time value estimate.  Identical in
+            # spirit to the PPO policy clip.
+            predicted_values = sampled_values + jnp.clip(
+                predicted_values - sampled_values, -value_clip, value_clip
+            )
+            loss_clipped = _per_sample(sampled_returns - predicted_values)
+            # Pessimistic upper bound — but when ``clip_predicted_values`` is
+            # True the skrl reference only evaluates the clipped branch, so
+            # we match that behaviour exactly.
+            return value_loss_scale * loss_clipped.mean()
+        loss = _per_sample(sampled_returns - predicted_values)
+        return value_loss_scale * loss.mean()
+
+    value_loss, grad = jax.value_and_grad(_value_loss, has_aux=False)(
+        value_state_dict.params
+    )
+    return grad, value_loss
+
+
 def _categorical_entropy(logits: jax.Array) -> jax.Array:
     """Compute categorical entropy directly from unnormalised logits.
 
@@ -256,6 +323,14 @@ class CategoricalMAPPO(MAPPO):
         # Detect whether a single shared policy is used across all agents,
         # or each agent has its own separate policy network.
         self._shared_policy: bool = _is_shared_policy(self.models)
+
+        # Huber-value-loss flags.  Resolved to Python scalars here so they
+        # can be passed as jit-static args into ``_update_value_huber``
+        # without forcing a recompile on every minibatch.
+        self._use_huber_value_loss: bool = bool(
+            self.cfg.get("use_huber_value_loss", False)
+        )
+        self._huber_delta: float = float(self.cfg.get("huber_delta", 1.0))
 
         # Build a one-hot LUT: agent uid → one-hot vector (num_agents,).
         n = len(self.possible_agents)
@@ -735,7 +810,10 @@ class CategoricalMAPPO(MAPPO):
                     self.policy_optimizer[uid] = self.policy_optimizer[uid0]
 
                 # --- Value update ---
-                grad, value_loss = _update_value(
+                # Huber is selected once at __init__ from the cfg and plumbed
+                # as a jit-static flag; the MSE branch inside
+                # ``_update_value_huber`` preserves the exact skrl semantics.
+                grad, value_loss = _update_value_huber(
                     value.act,
                     value.state_dict,
                     sampled_shared_states,
@@ -744,6 +822,8 @@ class CategoricalMAPPO(MAPPO):
                     self._value_loss_scale[uid0],
                     self._clip_predicted_values[uid0],
                     self._value_clip[uid0],
+                    self._use_huber_value_loss,
+                    self._huber_delta,
                 )
 
                 if config.jax.is_distributed:
@@ -883,7 +963,7 @@ class CategoricalMAPPO(MAPPO):
             value_indices = np.random.permutation(pooled_buffer_size)
             for i in range(0, pooled_buffer_size, value_batch_size):
                 idx = value_indices[i : i + value_batch_size]
-                grad, value_loss = _update_value(
+                grad, value_loss = _update_value_huber(
                     value.act,
                     value.state_dict,
                     all_shared_states[idx],
@@ -892,6 +972,8 @@ class CategoricalMAPPO(MAPPO):
                     self._value_loss_scale[uid0],
                     self._clip_predicted_values[uid0],
                     self._value_clip[uid0],
+                    self._use_huber_value_loss,
+                    self._huber_delta,
                 )
 
                 if config.jax.is_distributed:

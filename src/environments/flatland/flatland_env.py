@@ -8,7 +8,6 @@ import numpy as np
 from gymnasium import spaces
 
 from .config import (
-    FLATLAND_STATUS_DIM,
     FlatlandConfig,
     flatland_observation_dim,
     flatland_state_dim,
@@ -45,7 +44,9 @@ class FlatlandPettingZooEnv:
         self._tree_actions = tuple(TreeObsForRailEnv.tree_explored_actions_char)
 
         predictor = ShortestPathPredictorForRailEnv(max_depth=config.prediction_depth)
-        obs_builder = TreeObsForRailEnv(max_depth=config.tree_depth, predictor=predictor)
+        obs_builder = TreeObsForRailEnv(
+            max_depth=config.tree_depth, predictor=predictor
+        )
 
         malfunction_generator = None
         if config.use_malfunctions:
@@ -117,6 +118,22 @@ class FlatlandPettingZooEnv:
         self._renderer = None
         self._renderer_failed = False
 
+        # Dense-reward shaping state.
+        # ``_distance_map`` is (num_agents, H, W, 4) distance-to-target, clamped
+        # to a finite max.  ``_prev_distances`` is the last per-agent d value so
+        # we can compute a one-step potential delta.  ``_deadlock_fired`` is a
+        # one-shot flag so the deadlock penalty fires exactly once per agent
+        # per episode (otherwise a stuck agent would bleed -1 per step forever
+        # and drown the gradient again).
+        max_cells = float(config.height * config.width)
+        self._max_distance = max_cells
+        self._distance_map = np.zeros(
+            (self.num_agents, config.height, config.width, 4), dtype=np.float32
+        )
+        self._prev_distances = np.full(self.num_agents, max_cells, dtype=np.float32)
+        self._deadlock_fired = np.zeros(self.num_agents, dtype=bool)
+        self._completion_ratio = 0.0
+
     @property
     def possible_agents(self) -> list[str]:
         return list(self._possible_agents)
@@ -158,6 +175,9 @@ class FlatlandPettingZooEnv:
         self, seed: int | None = None, **kwargs
     ) -> tuple[dict[str, np.ndarray], dict[str, dict[str, Any]]]:
         random_seed = seed if seed is not None else self._config.random_seed
+        # Ensure we never pass None to the underlying RailEnv.reset
+        if random_seed is None:
+            random_seed = 0
         raw_obs, raw_info = self._env.reset(
             regenerate_rail=self._config.regenerate_rail_on_reset,
             regenerate_schedule=self._config.regenerate_schedule_on_reset,
@@ -170,10 +190,22 @@ class FlatlandPettingZooEnv:
         self._episode_steps = 0
         self._episode_return = 0.0
 
+        if self._renderer is not None:
+            self._renderer.reset()
+
         obs = self._build_obs_dict(raw_obs)
         infos = self._build_infos(raw_info)
         self._last_obs = obs
         self._last_info = infos
+
+        # Refresh distance tracking once the new rail is in place.  Flatland
+        # rebuilds its internal distance map on every reset when regenerate_*
+        # is True, so we always re-pull it here.
+        self._refresh_distance_map()
+        self._deadlock_fired[:] = False
+        for idx in range(self.num_agents):
+            self._prev_distances[idx] = self._agent_distance(idx)
+        self._completion_ratio = 0.0
         return obs, infos
 
     def step(
@@ -202,6 +234,17 @@ class FlatlandPettingZooEnv:
             agent_name: float(raw_rewards.get(self._agent_ids[agent_name], 0.0))
             for agent_name in self._possible_agents
         }
+
+        # Dense shaping must run *before* the episode return is accumulated
+        # (so the logged return reflects the reward the agent actually sees)
+        # and *before* the terminated flags are propagated, because the
+        # completion bonus is conditioned on per-agent terminal state which
+        # we derive from raw_dones here.
+        per_agent_terminated = {
+            agent_name: bool(raw_dones.get(self._agent_ids[agent_name], False))
+            for agent_name in self._possible_agents
+        }
+        rewards = self._shape_rewards(rewards, per_agent_terminated)
         self._episode_return += float(sum(rewards.values()))
 
         infos = self._build_infos(raw_info)
@@ -234,6 +277,21 @@ class FlatlandPettingZooEnv:
 
         try:
             if self._renderer is None:
+                # Patch flatland for numpy 2.x compatibility before initializing RenderTool
+                import flatland.core.grid.grid4 as grid4
+
+                _orig_set_transitions = grid4.fast_grid4_set_transitions
+
+                def _patched_set_transitions(cell_transition, orientation, block_tuple):
+                    mask = block_tuple[0]
+                    new_transitions = block_tuple[1]
+                    negmask = (~mask) & 0xFFFF
+                    return (cell_transition & negmask) | (
+                        new_transitions << ((3 - orientation) * 4)
+                    )
+
+                grid4.fast_grid4_set_transitions = _patched_set_transitions
+
                 from flatland.utils.rendertools import RenderTool
 
                 self._renderer = RenderTool(self._env, gl="PILSVG")
@@ -306,7 +364,9 @@ class FlatlandPettingZooEnv:
             malfunction = int(
                 info_malfunction.get(
                     agent_idx,
-                    getattr(env_agent.malfunction_handler, "_malfunction_down_counter", 0),
+                    getattr(
+                        env_agent.malfunction_handler, "_malfunction_down_counter", 0
+                    ),
                 )
             )
             speed = float(
@@ -329,6 +389,10 @@ class FlatlandPettingZooEnv:
             }
 
         completion_ratio = completion_count / max(1, self.num_agents)
+        # Mirror on the instance so the vectorized wrapper can read the
+        # latest completion ratio for curriculum scheduling without having
+        # to dig through info dicts.
+        self._completion_ratio = float(completion_ratio)
         for agent_name in self._possible_agents:
             infos[agent_name]["completion_count"] = completion_count
             infos[agent_name]["completion_ratio"] = completion_ratio
@@ -336,6 +400,11 @@ class FlatlandPettingZooEnv:
             infos[agent_name]["total_return"] = self._episode_return
 
         return infos
+
+    @property
+    def completion_ratio(self) -> float:
+        """Latest per-episode completion ratio (fraction of agents done)."""
+        return self._completion_ratio
 
     def _flatten_tree_observation(self, node: Any) -> np.ndarray:
         values: list[float] = []
@@ -382,6 +451,115 @@ class FlatlandPettingZooEnv:
             ],
             dtype=np.float32,
         )
+
+    def _refresh_distance_map(self) -> None:
+        """Snapshot Flatland's per-agent distance-to-target map.
+
+        ``RailEnv.distance_map.get()`` returns a ``(num_agents, H, W, 4)``
+        array of minimum rail-path lengths from every (row, col, direction)
+        cell to each agent's target, computed from the current schedule.
+        Cells with no feasible path hold ``inf`` — we clamp them to
+        ``H*W`` so that (a) the progress delta stays finite when an agent
+        crosses that boundary and (b) the deadlock detector can treat a
+        ``max_d`` reading as "no exit from this cell".
+        """
+        dmap = self._env.distance_map.get()
+        dmap = np.asarray(dmap, dtype=np.float32)
+        self._distance_map = np.where(
+            np.isfinite(dmap), dmap, self._max_distance
+        ).astype(np.float32)
+
+    def _agent_distance(self, idx: int) -> float:
+        """Current shortest-path distance-to-target for agent ``idx``.
+
+        Uses the live ``RailEnv`` agent pose (position + direction) rather
+        than the cached obs so we don't pick up a stale value after step.
+        Before an agent has left its initial cell ``agent.position`` is
+        ``None``; in that case we fall back to ``initial_position`` / the
+        initial direction so the very first ``reset`` prev-distance is sane.
+        """
+        ag = self._env.agents[idx]
+        pos = ag.position if ag.position is not None else ag.initial_position
+        if pos is None:
+            return self._max_distance
+        r, c = int(pos[0]), int(pos[1])
+        d = int(ag.direction if ag.direction is not None else ag.initial_direction or 0)
+        return float(self._distance_map[idx, r, c, d])
+
+    def _is_agent_deadlocked(self, idx: int) -> bool:
+        """Best-effort deadlock detection without Flatland's internal API.
+
+        We classify an agent as deadlocked when it is on the map, not yet
+        done, not currently malfunctioning, and all four outgoing distances
+        from its current cell are clamped to ``max_distance`` — i.e. there
+        is no feasible path to its target from here.  Malfunctioning agents
+        are excluded so we don't double-penalise a transient freeze.
+        """
+        ag = self._env.agents[idx]
+        if ag.position is None or self._is_done_state(ag.state):
+            return False
+        # Skip agents currently frozen by a malfunction.
+        mal = getattr(ag.malfunction_handler, "_malfunction_down_counter", 0)
+        if mal and mal > 0:
+            return False
+        r, c = int(ag.position[0]), int(ag.position[1])
+        return bool((self._distance_map[idx, r, c, :] >= self._max_distance).all())
+
+    def _shape_rewards(
+        self,
+        raw_rewards: dict[str, float],
+        terminated: dict[str, bool],
+    ) -> dict[str, float]:
+        """Potential-based shaping + step / deadlock / completion terms.
+
+        Mathematical form per agent per step::
+
+            r_shaped = r_raw
+                     + α * clip(d_{t-1} - d_t, -C, +C)   # progress potential
+                     - β * 1{active ∧ ¬done}              # step penalty
+                     - γ * 1{first deadlock}              # one-shot deadlock
+                     + ρ * 1{terminated (reached target)} # completion bonus
+
+        Potential-based shaping is policy-invariant for the optimal policy
+        set (Ng, Harada, Russell 1999), but drastically speeds learning by
+        handing out per-step credit the critic can actually latch onto.
+        ``_deadlock_fired`` guarantees the deadlock penalty fires *once*
+        per agent per episode — otherwise a permanently-stuck agent would
+        re-bleed -1 every step and drown the rest of the signal.
+        """
+        cfg = self._config
+        if not cfg.use_shaped_reward:
+            return raw_rewards
+
+        shaped: dict[str, float] = {}
+        for agent_name, agent_idx in self._agent_ids.items():
+            curr_d = self._agent_distance(agent_idx)
+            prev_d = float(self._prev_distances[agent_idx])
+            progress = cfg.progress_coeff * (prev_d - curr_d)
+            progress = float(
+                np.clip(progress, -cfg.progress_clip, cfg.progress_clip)
+            )
+
+            is_done = bool(terminated[agent_name])
+            step_pen = -cfg.step_penalty if not is_done else 0.0
+
+            dead_pen = 0.0
+            if not is_done and not self._deadlock_fired[agent_idx]:
+                if self._is_agent_deadlocked(agent_idx):
+                    dead_pen = -cfg.deadlock_penalty
+                    self._deadlock_fired[agent_idx] = True
+
+            done_bonus = cfg.completion_bonus if is_done else 0.0
+
+            shaped[agent_name] = (
+                float(raw_rewards.get(agent_name, 0.0))
+                + progress
+                + step_pen
+                + dead_pen
+                + done_bonus
+            )
+            self._prev_distances[agent_idx] = curr_d
+        return shaped
 
     def _is_ready_state(self, state: Any) -> bool:
         return state == self._TrainState.READY_TO_DEPART

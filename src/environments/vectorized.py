@@ -142,9 +142,24 @@ class VectorizedPettingZooEnv:
 
         self._last_obs: dict[str, np.ndarray] = {}
 
+        # Mean ``completion_ratio`` across the per-env instances at the last
+        # time an episode ended (auto-reset).  Used by curriculum schedulers
+        # that need a signal of "how close is the policy to mastering the
+        # current stage" without having to parse per-agent info dicts.
+        self._last_completion_ratio: float = 0.0
+
     @property
     def num_envs(self) -> int:
         return self._num_envs
+
+    @property
+    def last_completion_ratio(self) -> float:
+        """Mean per-episode completion ratio from the most recent auto-reset.
+
+        Zero until at least one wrapped env has finished an episode since
+        either construction or the last call to :meth:`reset`.
+        """
+        return self._last_completion_ratio
 
     @property
     def possible_agents(self) -> list[str]:
@@ -319,16 +334,30 @@ class VectorizedPettingZooEnv:
         truncated_list = [r[3] for r in results]
         infos_list = [r[4] for r in results]
 
-        # Handle auto-reset for terminated/truncated environments
+        # Handle auto-reset for terminated/truncated environments.  On every
+        # reset we also pull the just-finished env's ``completion_ratio``
+        # (if exposed) and fold it into an EMA across workers, so the
+        # curriculum scheduler sees a live signal even when episodes finish
+        # at different wall-clock times across workers.
+        ratios_this_step: list[float] = []
         for i, (term, trunc) in enumerate(zip(terminated_list, truncated_list)):
-            # Check if all agents are done
             all_done = all(
                 term.get(a, False) or trunc.get(a, False) for a in self._possible_agents
             )
             if all_done:
-                # Auto-reset this environment
+                ratio = getattr(self._envs[i], "completion_ratio", None)
+                if ratio is not None:
+                    ratios_this_step.append(float(ratio))
                 new_obs, _ = self._envs[i].reset()
                 obs_list[i] = new_obs
+
+        if ratios_this_step:
+            # Simple arithmetic mean over the workers that actually finished
+            # in this step.  The outer curriculum scheduler applies its own
+            # EMA on top of this, so we don't need to smooth here.
+            self._last_completion_ratio = float(
+                sum(ratios_this_step) / len(ratios_this_step)
+            )
 
         # Batch all outputs
         obs_batched = self._batch_observations(obs_list)
