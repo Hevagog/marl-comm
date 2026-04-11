@@ -36,6 +36,10 @@ class WarehouseConfig:
     num_goal_locations: int = 2
     treatment_duration: int = 5
 
+    # Per-episode layout randomization (structural jitter within fixed bands).
+    randomize_layout: bool = False
+    layout_shuffle_max_retries: int = 20
+
     # Anomaly probabilities
     agent_failure_prob: float = 0.001
     comm_noise_prob: float = 0.1

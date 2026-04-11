@@ -207,7 +207,7 @@ class MultiRobotWarehouseEnv:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        grid_state = create_warehouse_layout(self._config)
+        grid_state = create_warehouse_layout(self._config, rng=self._rng)
         agent_state = create_agent_state(self._config, grid_state.spawn_positions)
 
         self._state = EnvState(
