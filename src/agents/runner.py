@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import tqdm as _tqdm_mod
 from skrl.trainers.jax import SequentialTrainer
 
 from utils.warehouse_eval_analysis import WarehouseEvalCollector
@@ -12,6 +15,92 @@ from utils.warehouse_eval_visualizer import save_all_warehouse_figures
 if TYPE_CHECKING:
     from skrl.multi_agents.jax import MultiAgent
     from environments.flatland import FlatlandConfig
+
+
+class _CurriculumSequentialTrainer(SequentialTrainer):
+    """SequentialTrainer variant for curriculum training.
+
+    Separates two concerns that the stock trainer conflates:
+
+    * **segment_end** — the timestep at which *this segment's loop* stops.
+      Set to ``initial_timestep + segment_timesteps`` before each ``train()``
+      call.  Controls ``range(initial_timestep, segment_end)`` in the loop.
+
+    * **total_timesteps** — the full training budget passed to the agent's
+      pre/post_interaction callbacks.  The agent uses this value for LR
+      decay and entropy annealing.  Must equal the run's total timestep
+      budget and must never change.
+
+    Without this separation the stock trainer passes ``trainer.timesteps``
+    (= ``segment_end``) to the agent, so the agent thinks its full budget
+    is 2 000 steps and decays the LR to the floor within the first segment.
+    """
+
+    def __init__(self, total_timesteps: int, **kwargs: Any) -> None:
+        self._total_timesteps: int = total_timesteps
+        # segment_end is updated by _train_with_curriculum before each call.
+        self.segment_end: int = total_timesteps
+        super().__init__(**kwargs)
+
+    def train(self) -> None:  # type: ignore[override]
+        self.agents.set_running_mode("train")
+        # Our env always has num_agents > 1 (Flatland).
+        if self.env.num_agents > 1:
+            self._curriculum_multi_agent_train()
+        else:
+            self.single_agent_train()
+
+    def _curriculum_multi_agent_train(self) -> None:
+        """multi_agent_train with segment_end loop bound and total_timesteps scheduling."""
+        states, infos = self.env.reset()
+        shared_states = self.env.state()
+
+        for timestep in _tqdm_mod.tqdm(
+            range(self.initial_timestep, self.segment_end),
+            disable=self.disable_progressbar,
+            file=sys.stdout,
+        ):
+            self.agents.pre_interaction(
+                timestep=timestep, timesteps=self._total_timesteps
+            )
+
+            with contextlib.nullcontext():
+                actions = self.agents.act(
+                    states, timestep=timestep, timesteps=self._total_timesteps
+                )[0]
+
+                next_states, rewards, terminated, truncated, infos = self.env.step(
+                    actions
+                )
+                shared_next_states = self.env.state()
+                infos["shared_states"] = shared_states
+                infos["shared_next_states"] = shared_next_states
+
+                if not self.headless:
+                    self.env.render()
+
+                self.agents.record_transition(
+                    states=states,
+                    actions=actions,
+                    rewards=rewards,
+                    next_states=next_states,
+                    terminated=terminated,
+                    truncated=truncated,
+                    infos=infos,
+                    timestep=timestep,
+                    timesteps=self._total_timesteps,
+                )
+
+            self.agents.post_interaction(
+                timestep=timestep, timesteps=self._total_timesteps
+            )
+
+            if not self.env.agents:
+                states, infos = self.env.reset()
+                shared_states = self.env.state()
+            else:
+                states = next_states
+                shared_states = shared_next_states
 
 
 class BaseRunner(ABC):
@@ -163,22 +252,23 @@ class BaseRunner(ABC):
 
         done = initial_timestep
 
-        # Create the trainer ONCE.  SequentialTrainer.__init__ calls
-        # agent.init(trainer_cfg=...) which sets up wandb / TensorBoard and
-        # initialises the agent's metric counters.  Re-creating the trainer
-        # each segment would call agent.init() again, resetting those counters
-        # and triggering "wandb.init() called while a run is active" warnings.
-        # Instead we reuse the same trainer and update the three fields that
-        # SequentialTrainer.train() → multi_agent_train() reads each call:
-        # self.env, self.initial_timestep, self.timesteps.
-        trainer = SequentialTrainer(
+        # Create the trainer ONCE.
+        # _CurriculumSequentialTrainer separates two values that the stock
+        # SequentialTrainer conflates:
+        #   segment_end      — upper bound for this segment's loop
+        #   _total_timesteps — budget passed to agent pre/post_interaction for
+        #                      LR decay and entropy annealing
+        # Without this split, each segment sets trainer.timesteps = done + seg,
+        # so the agent decays its LR over 2 000 steps instead of 1 000 000,
+        # reaching the min_lr floor by the end of segment 0.
+        trainer = _CurriculumSequentialTrainer(
+            total_timesteps=total,
             env=self._env,
             agents=self._agent,  # type: ignore[arg-type]
             cfg={
-                "timesteps": total,           # upper bound; overridden per segment below
+                "timesteps": total,
                 "headless": True,
                 "disable_progressbar": False,
-                # We manage env lifecycle — don't let atexit close it mid-curriculum.
                 "close_environment_at_exit": False,
             },
         )
@@ -186,10 +276,10 @@ class BaseRunner(ABC):
         while done < total:
             this_segment = min(segment, total - done)
 
-            # Update the three mutable fields that drive the training loop.
+            # Update per-segment fields — total_timesteps stays fixed.
             trainer.env = self._env
             trainer.initial_timestep = done
-            trainer.timesteps = done + this_segment
+            trainer.segment_end = done + this_segment
 
             print(
                 f"[curriculum] segment {done}–{done + this_segment} "

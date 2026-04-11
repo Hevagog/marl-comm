@@ -536,9 +536,7 @@ class FlatlandPettingZooEnv:
             curr_d = self._agent_distance(agent_idx)
             prev_d = float(self._prev_distances[agent_idx])
             progress = cfg.progress_coeff * (prev_d - curr_d)
-            progress = float(
-                np.clip(progress, -cfg.progress_clip, cfg.progress_clip)
-            )
+            progress = float(np.clip(progress, -cfg.progress_clip, cfg.progress_clip))
 
             is_done = bool(terminated[agent_name])
             step_pen = -cfg.step_penalty if not is_done else 0.0

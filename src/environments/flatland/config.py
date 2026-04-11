@@ -58,8 +58,8 @@ class FlatlandConfig:
     # 25-step rollout sees no action-conditional signal.  These terms inject
     # local credit from the distance map and explicit terminal anchors.
     use_shaped_reward: bool = False
-    progress_coeff: float = 0.1       # +coeff * (prev_d - curr_d) per agent per step
-    step_penalty: float = 0.01        # constant time pressure for active agents
-    deadlock_penalty: float = 1.0     # fired once when an agent first deadlocks
-    completion_bonus: float = 1.0     # fired on terminal (reached target)
-    progress_clip: float = 1.0        # absolute clip on per-step progress delta
+    progress_coeff: float = 0.1  # +coeff * (prev_d - curr_d) per agent per step
+    step_penalty: float = 0.01  # constant time pressure for active agents
+    deadlock_penalty: float = 1.0  # fired once when an agent first deadlocks
+    completion_bonus: float = 1.0  # fired on terminal (reached target)
+    progress_clip: float = 1.0  # absolute clip on per-step progress delta

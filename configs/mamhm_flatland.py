@@ -18,7 +18,11 @@ ENV.update({
     "use_shaped_reward":       True,
     "progress_coeff":          0.1,
     "step_penalty":            0.01,
-    "deadlock_penalty":        1.0,
+    # Deadlock penalty reduced 1.0→0.3: random policy deadlocks all agents
+    # almost every episode, so 1.0 floods the critic with a one-shot noise
+    # spike that is 10× the progress_coeff signal.  0.3 keeps the penalty
+    # meaningful without drowning the gradient.
+    "deadlock_penalty":        0.3,
     "completion_bonus":        1.0,
     "progress_clip":           1.0,
 })
@@ -159,7 +163,7 @@ CONFIG = {
         # grid size / city count / malfunctions.  Base stages are defined
         # in src/environments/flatland/curriculum.py.
         "enabled":            True,
-        "segment_timesteps":  2_000,
+        "segment_timesteps":  5_000,
         # "stages": ...   # optional: tuple[CurriculumStage, ...]
     },
 }

@@ -1,5 +1,5 @@
 # fmt: off
-from flatland_basic import FLATLAND_BASIC_ENV, flatland_dims
+from configs.flatland_basic import FLATLAND_BASIC_ENV, flatland_dims
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 
 # Start from the shared Flatland base env config, then apply the
@@ -17,7 +17,11 @@ ENV.update({
     "use_shaped_reward":       True,
     "progress_coeff":          0.1,    # +0.1 * (d_{t-1} - d_t)
     "step_penalty":            0.01,   # constant time pressure
-    "deadlock_penalty":        1.0,    # one-shot per deadlocked agent
+    # Deadlock penalty reduced 1.0→0.3: in stage-0 with a random policy all
+    # 8 agents deadlock immediately every episode, so a 1.0 penalty floods
+    # the critic with a large one-shot noise that overwhelms the 0.1-scale
+    # progress signal.  0.3 keeps the penalty meaningful without dominating.
+    "deadlock_penalty":        0.3,
     "completion_bonus":        1.0,    # terminal anchor on arrival
     "progress_clip":           1.0,    # cap per-step progress delta
 })
@@ -36,13 +40,13 @@ CONFIG = {
             "project": "marl-comm",
             "tags":    ["mam", "flatland", "rescue", "curriculum"],
         },
-        "write_interval":      25,
-        "checkpoint_interval": 50,
+        "write_interval":      1_000,
+        "checkpoint_interval": 25_000,
         "store_separately":    False,
     },
     "env": ENV,
     "training": {
-        "timesteps": 20_000,
+        "timesteps": 500_000,
         "seed":      42,
     },
     "eval": {
@@ -136,7 +140,10 @@ CONFIG = {
         # in ``src/environments/flatland/curriculum.py``; override the
         # ``stages`` key here to customise.
         "enabled":            True,
-        "segment_timesteps":  2_000,
+        # 5 000-step segments: longer than 2 000 so each segment spans ~78
+        # gradient updates (5000 / 64 rollout), giving the LR scheduler and
+        # critic more time to converge before the curriculum check fires.
+        "segment_timesteps":  5_000,
         # "stages": ...   # optional: tuple[CurriculumStage, ...]
     },
 }

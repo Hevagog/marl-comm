@@ -185,10 +185,9 @@ class CurriculumScheduler:
             :attr:`current`.
         """
         self._steps_in_stage += int(rollout_steps)
-        self._ema_completion = (
-            self._EMA_MOMENTUM * self._ema_completion
-            + (1.0 - self._EMA_MOMENTUM) * float(completion_ratio)
-        )
+        self._ema_completion = self._EMA_MOMENTUM * self._ema_completion + (
+            1.0 - self._EMA_MOMENTUM
+        ) * float(completion_ratio)
         stage = self.current
         if (
             self._ema_completion >= stage.completion_threshold
