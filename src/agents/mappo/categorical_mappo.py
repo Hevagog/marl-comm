@@ -209,9 +209,12 @@ def _update_policy_fixed(
        Gradient flows via the straight-through Gumbel-Softmax estimator.
     """
 
-    sampled_advantages = (sampled_advantages - sampled_advantages.mean()) / (
-        sampled_advantages.std() + 1e-8
-    )
+    raw_adv_mean = sampled_advantages.mean()
+    raw_adv_std = sampled_advantages.std()
+    raw_adv_min = sampled_advantages.min()
+    raw_adv_max = sampled_advantages.max()
+
+    sampled_advantages = (sampled_advantages - raw_adv_mean) / (raw_adv_std + 1e-8)
 
     # Resolve at Python level so the conditional is not traced by JAX.
     use_comm_reg = comm_reg_scale > 0.0
@@ -234,6 +237,14 @@ def _update_policy_fixed(
         surrogate_clipped = sampled_advantages * jnp.clip(
             ratio, 1.0 - ratio_clip, 1.0 + ratio_clip
         )
+
+        ratio_mean = ratio.mean()
+        ratio_std = ratio.std()
+        ratio_max_abs_dev = jnp.abs(ratio - 1.0).max()
+        ratio_clipped_frac = (
+            (ratio < 1.0 - ratio_clip) | (ratio > 1.0 + ratio_clip)
+        ).mean().astype(jnp.float32)
+        surrogate_raw_mean = surrogate.mean()
 
         policy_loss = -jnp.minimum(surrogate, surrogate_clipped).mean()
 
@@ -285,14 +296,35 @@ def _update_policy_fixed(
                 div_loss = jnp.sum(mask * jnp.square(sim)) / jnp.maximum(n_pairs, 1.0)
                 total_loss = total_loss + diversity_loss_scale * div_loss
 
-        return total_loss, (entropy_loss, kl_divergence, entropy.mean())
+        diag = {
+            "ratio_mean": ratio_mean,
+            "ratio_std": ratio_std,
+            "ratio_max_abs_dev": ratio_max_abs_dev,
+            "ratio_clipped_frac": ratio_clipped_frac,
+            "surrogate_raw_mean": surrogate_raw_mean,
+        }
+        return total_loss, (entropy_loss, kl_divergence, entropy.mean(), diag)
 
-    (total_loss, (entropy_loss, kl_divergence, mean_entropy)), grad = (
+    (total_loss, (entropy_loss, kl_divergence, mean_entropy, diag)), grad = (
         jax.value_and_grad(_policy_loss, has_aux=True)(policy_state_dict.params)
     )
 
+    leaves = jax.tree_util.tree_leaves(grad)
+    grad_global_norm = jnp.sqrt(
+        sum(jnp.vdot(leaf, leaf).real for leaf in leaves)
+    )
+
+    diag = {
+        **diag,
+        "adv_raw_mean": raw_adv_mean,
+        "adv_raw_std": raw_adv_std,
+        "adv_raw_min": raw_adv_min,
+        "adv_raw_max": raw_adv_max,
+        "grad_global_norm": grad_global_norm,
+    }
+
     policy_loss = total_loss - entropy_loss
-    return grad, policy_loss, entropy_loss, kl_divergence, mean_entropy
+    return grad, policy_loss, entropy_loss, kl_divergence, mean_entropy, diag
 
 
 def _is_shared_policy(models) -> bool:
@@ -749,6 +781,7 @@ class CategoricalMAPPO(MAPPO):
         cumulative_policy_loss = 0.0
         cumulative_entropy_loss = 0.0
         cumulative_value_loss = 0.0
+        cumulative_diag: dict[str, float] = {}
         actual_batch_count = 0
         kl_exceeded = False
         mean_entropy = jnp.float32(0.0)
@@ -771,21 +804,28 @@ class CategoricalMAPPO(MAPPO):
                     sampled_advantages,
                 ) = (t[idx] for t in pooled_list)
                 # --- Policy update ---
-                grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
-                    _update_policy_fixed(
-                        policy.act,
-                        policy.state_dict,
-                        sampled_states,
-                        sampled_actions,
-                        sampled_log_prob,
-                        sampled_advantages,
-                        self._ratio_clip[uid0],
-                        effective_entropy_loss_scale,
-                        self.cfg.get("debug_entropy_stats", False),
-                        self.cfg.get("comm_reg_scale", 0.0),
-                        self.cfg.get("diversity_loss_scale", 0.0),
-                    )
+                (
+                    grad,
+                    policy_loss,
+                    entropy_loss,
+                    kl_divergence,
+                    mean_entropy,
+                    diag,
+                ) = _update_policy_fixed(
+                    policy.act,
+                    policy.state_dict,
+                    sampled_states,
+                    sampled_actions,
+                    sampled_log_prob,
+                    sampled_advantages,
+                    self._ratio_clip[uid0],
+                    effective_entropy_loss_scale,
+                    self.cfg.get("debug_entropy_stats", False),
+                    self.cfg.get("comm_reg_scale", 0.0),
+                    self.cfg.get("diversity_loss_scale", 0.0),
                 )
+                for k, v in diag.items():
+                    cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
                 if (
                     apply_kl_stop
@@ -851,6 +891,7 @@ class CategoricalMAPPO(MAPPO):
             mean_entropy,
             new_lr,
             per_agent_tensors,
+            cumulative_diag=cumulative_diag,
         )
 
     def _update_per_agent_policies(
@@ -893,6 +934,7 @@ class CategoricalMAPPO(MAPPO):
         cumulative_policy_loss = 0.0
         cumulative_entropy_loss = 0.0
         cumulative_value_loss = 0.0
+        cumulative_diag: dict[str, float] = {}
         actual_batch_count = 0
         mean_entropy = jnp.float32(0.0)
         new_lr = self._learning_rate[uid0]
@@ -918,21 +960,28 @@ class CategoricalMAPPO(MAPPO):
                     sampled_log_prob = tensors["log_prob"][idx]
                     sampled_advantages = tensors["advantages"][idx]
 
-                    grad, policy_loss, entropy_loss, kl_divergence, mean_entropy = (
-                        _update_policy_fixed(
-                            policy.act,
-                            policy.state_dict,
-                            sampled_states,
-                            sampled_actions,
-                            sampled_log_prob,
-                            sampled_advantages,
-                            self._ratio_clip[uid],
-                            effective_entropy_loss_scale,
-                            self.cfg.get("debug_entropy_stats", False),
-                            self.cfg.get("comm_reg_scale", 0.0),
-                            self.cfg.get("diversity_loss_scale", 0.0),
-                        )
+                    (
+                        grad,
+                        policy_loss,
+                        entropy_loss,
+                        kl_divergence,
+                        mean_entropy,
+                        diag,
+                    ) = _update_policy_fixed(
+                        policy.act,
+                        policy.state_dict,
+                        sampled_states,
+                        sampled_actions,
+                        sampled_log_prob,
+                        sampled_advantages,
+                        self._ratio_clip[uid],
+                        effective_entropy_loss_scale,
+                        self.cfg.get("debug_entropy_stats", False),
+                        self.cfg.get("comm_reg_scale", 0.0),
+                        self.cfg.get("diversity_loss_scale", 0.0),
                     )
+                    for k, v in diag.items():
+                        cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
                     if (
                         apply_kl_stop
@@ -998,6 +1047,7 @@ class CategoricalMAPPO(MAPPO):
             mean_entropy,
             new_lr,
             per_agent_tensors,
+            cumulative_diag=cumulative_diag,
         )
 
     def _apply_lr_decay(self, timestep: int, timesteps: int) -> float:
@@ -1034,6 +1084,7 @@ class CategoricalMAPPO(MAPPO):
         mean_entropy,
         new_lr,
         per_agent_tensors,
+        cumulative_diag: dict[str, float] | None = None,
     ) -> None:
         """Log training statistics to the experiment tracker."""
         n_batches = max(actual_batch_count, 1)
@@ -1062,3 +1113,7 @@ class CategoricalMAPPO(MAPPO):
             )
         self.track_data("Learning / Learning rate", float(new_lr))
         self.track_data("Learning / Entropy scale", effective_entropy_loss_scale)
+
+        if cumulative_diag:
+            for key, total in cumulative_diag.items():
+                self.track_data(f"Diagnostics / {key}", total / n_batches)
