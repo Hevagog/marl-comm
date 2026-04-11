@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import numpy as np
 
 from ..config import WarehouseConfig
@@ -266,7 +264,7 @@ def apply_agent_attrition(
     state: EnvState,
     config: WarehouseConfig,
     rng: np.random.Generator,
-) -> Tuple[EnvState, np.ndarray]:
+) -> tuple[EnvState, np.ndarray]:
     """Apply agent failures.
 
     Returns updated state and boolean mask of newly-failed agents.
@@ -337,7 +335,7 @@ def apply_movement(
     state: EnvState,
     actions: np.ndarray,
     config: WarehouseConfig,
-) -> Tuple[EnvState, np.ndarray]:
+) -> tuple[EnvState, np.ndarray]:
     """Apply movement actions.  Supports multi-cell speed & battery drain."""
     H, W = config.grid_height, config.grid_width
     layout = state.grid.layout
@@ -484,7 +482,7 @@ def apply_battery_logic(
 def apply_rescue_completion(
     state: EnvState,
     config: WarehouseConfig,
-) -> Tuple[EnvState, np.ndarray, np.ndarray]:
+) -> tuple[EnvState, np.ndarray, np.ndarray]:
     """Resolve rescues that reached repair or charging destinations."""
     repair_success = np.zeros(config.max_agents, dtype=np.bool_)
     charge_success = np.zeros(config.max_agents, dtype=np.bool_)
@@ -569,7 +567,7 @@ def apply_interactions(
     state: EnvState,
     actions: np.ndarray,
     config: WarehouseConfig,
-) -> Tuple[EnvState, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[EnvState, np.ndarray, np.ndarray, np.ndarray]:
     """Apply INTERACT actions.  Returns updated state and event masks."""
     layout = state.grid.layout
 
@@ -733,7 +731,7 @@ def generate_new_tasks(
 def expire_tasks(
     state: EnvState,
     config: WarehouseConfig,
-) -> Tuple[EnvState, int]:
+) -> tuple[EnvState, int]:
     """Remove tasks whose deadline has passed.  Returns count of expired."""
     if not config.enable_task_deadlines:
         return state, 0

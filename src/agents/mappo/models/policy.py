@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Tuple, Union
+from typing import Any
+from collections.abc import Mapping
 from collections.abc import Sequence
 
 import flax.linen as nn
@@ -71,10 +72,10 @@ class PolicyNet(CategoricalMixin, Model):
 
     def act(
         self,
-        inputs: Mapping[str, Union[Union[np.ndarray, jax.Array], Any]],
+        inputs: Mapping[str, np.ndarray | jax.Array | Any],
         role: str = "",
-        params: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, Union[jax.Array, None], Mapping[str, Union[jax.Array, Any]]]:
+        params: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array | None, Mapping[str, jax.Array | Any]]:
         actions, log_prob, outputs = super().act(inputs, role, params)
         # Replace the NaN placeholder with actual logits so that
         # get_entropy(outputs["stddev"]) computes the correct categorical

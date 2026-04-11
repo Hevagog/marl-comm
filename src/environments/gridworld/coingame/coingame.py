@@ -35,7 +35,8 @@ UP(0), DOWN(1), LEFT(2), RIGHT(3)
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Mapping, Tuple
+from typing import Any, Dict, Literal, Tuple
+from collections.abc import Mapping
 
 import gymnasium
 import numpy as np
@@ -48,7 +49,7 @@ _ACTION_DOWN = 1
 _ACTION_LEFT = 2
 _ACTION_RIGHT = 3
 
-_DIRECTION_DELTAS: dict[int, Tuple[int, int]] = {
+_DIRECTION_DELTAS: dict[int, tuple[int, int]] = {
     _ACTION_UP: (0, -1),
     _ACTION_DOWN: (0, 1),
     _ACTION_LEFT: (-1, 0),
@@ -106,9 +107,9 @@ class CoinGameEnv:
         self._step_count: int = 0
         self._rng: np.random.Generator = np.random.default_rng()
 
-        self._agent_positions: dict[str, Tuple[int, int]] = {}
-        self._red_coin_pos: Tuple[int, int] | None = None
-        self._blue_coin_pos: Tuple[int, int] | None = None
+        self._agent_positions: dict[str, tuple[int, int]] = {}
+        self._red_coin_pos: tuple[int, int] | None = None
+        self._blue_coin_pos: tuple[int, int] | None = None
 
         self._renderer = None
 
@@ -155,7 +156,7 @@ class CoinGameEnv:
 
     def reset(
         self, seed: int | None = None, **kwargs: Any
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         """Reset the environment and return initial observations.
 
         Parameters
@@ -175,7 +176,7 @@ class CoinGameEnv:
         self._step_count = 0
 
         # Place agents at random non-overlapping positions
-        occupied: set[Tuple[int, int]] = set()
+        occupied: set[tuple[int, int]] = set()
         for agent in self._possible_agents:
             pos = self._random_empty_cell(occupied)
             self._agent_positions[agent] = pos
@@ -187,17 +188,17 @@ class CoinGameEnv:
         self._blue_coin_pos = self._random_empty_cell(occupied)
 
         obs = self._get_observations()
-        infos: Dict[str, dict] = {a: {} for a in self._agents}
+        infos: dict[str, dict] = {a: {} for a in self._agents}
         return obs, infos
 
-    def step(self, actions: Mapping[str, int | np.integer]) -> Tuple[
-        Dict[str, np.ndarray],  # observation
-        Dict[str, float],  # rewards
-        Dict[str, bool],  # terminated
-        Dict[str, bool],  # truncated
-        Dict[str, dict],  # infos
+    def step(self, actions: Mapping[str, int | np.integer]) -> tuple[
+        dict[str, np.ndarray],  # observation
+        dict[str, float],  # rewards
+        dict[str, bool],  # terminated
+        dict[str, bool],  # truncated
+        dict[str, dict],  # infos
     ]:
-        rewards: Dict[str, float] = {a: 0.0 for a in self._possible_agents}
+        rewards: dict[str, float] = {a: 0.0 for a in self._possible_agents}
         self._step_count += 1
 
         gs = self._config.grid_size
@@ -253,14 +254,14 @@ class CoinGameEnv:
 
         done = self._step_count >= self._config.max_cycles
 
-        terminated: Dict[str, bool] = {a: False for a in self._possible_agents}
-        truncated: Dict[str, bool] = {a: done for a in self._possible_agents}
+        terminated: dict[str, bool] = {a: False for a in self._possible_agents}
+        truncated: dict[str, bool] = {a: done for a in self._possible_agents}
 
         if done:
             self._agents = []
 
         obs = self._get_observations()
-        infos: Dict[str, dict] = {
+        infos: dict[str, dict] = {
             a: {
                 "step": self._step_count,
             }
@@ -306,7 +307,7 @@ class CoinGameEnv:
             self._renderer.close()
             self._renderer = None
 
-    def _random_empty_cell(self, occupied: set[Tuple[int, int]]) -> Tuple[int, int]:
+    def _random_empty_cell(self, occupied: set[tuple[int, int]]) -> tuple[int, int]:
         """Return a random grid cell that is not in occupied.
 
         Parameters
@@ -337,7 +338,7 @@ class CoinGameEnv:
             if (x, y) not in occupied:
                 return (x, y)
 
-    def _spawn_coin(self) -> Tuple[int, int]:
+    def _spawn_coin(self) -> tuple[int, int]:
         """Spawn a coin at a random empty cell (not on agents or other coin).
 
         Returns
@@ -345,7 +346,7 @@ class CoinGameEnv:
         (x, y) : tuple of int
             Position for the new coin.
         """
-        occupied: set[Tuple[int, int]] = set()
+        occupied: set[tuple[int, int]] = set()
         for agent in self._possible_agents:
             if agent in self._agent_positions:
                 occupied.add(self._agent_positions[agent])
@@ -355,7 +356,7 @@ class CoinGameEnv:
             occupied.add(self._blue_coin_pos)
         return self._random_empty_cell(occupied)
 
-    def _get_observations(self) -> Dict[str, np.ndarray]:
+    def _get_observations(self) -> dict[str, np.ndarray]:
         """
         Each observation is an 11-dimensional float32 vector:
 
@@ -369,7 +370,7 @@ class CoinGameEnv:
         11     Time (step count normalized to [0, 1])
         """
         gs_norm = max(self._config.grid_size - 1, 1)
-        obs: Dict[str, np.ndarray] = {}
+        obs: dict[str, np.ndarray] = {}
 
         for i, agent in enumerate(self._possible_agents):
             partner = self._possible_agents[1 - i]

@@ -30,7 +30,8 @@ Common layouts for coordination study:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Literal, Mapping, Tuple
+from typing import Literal
+from collections.abc import Mapping
 
 import gymnasium
 import numpy as np
@@ -209,7 +210,7 @@ class OvercookedPettingZooEnv:
 
     def reset(
         self, seed: int | None = None, **kwargs
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         """Reset the environment."""
         self._env.reset()
         self._state = self._env.state
@@ -222,12 +223,12 @@ class OvercookedPettingZooEnv:
 
     def step(
         self, actions: Mapping[str, int | np.integer]
-    ) -> Tuple[
-        Dict[str, np.ndarray],
-        Dict[str, float],
-        Dict[str, bool],
-        Dict[str, bool],
-        Dict[str, dict],
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, float],
+        dict[str, bool],
+        dict[str, bool],
+        dict[str, dict],
     ]:
         """Execute one timestep.
 
@@ -333,7 +334,7 @@ class OvercookedPettingZooEnv:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_observations(self) -> Dict[str, np.ndarray]:
+    def _get_observations(self) -> dict[str, np.ndarray]:
         """Convert current state to per-agent observations."""
         if self._state is None:
             return {
@@ -346,7 +347,7 @@ class OvercookedPettingZooEnv:
         else:
             return self._get_lossless_observations()
 
-    def _get_lossless_observations(self) -> Dict[str, np.ndarray]:
+    def _get_lossless_observations(self) -> dict[str, np.ndarray]:
         """Lossless grid encoding, flattened to 1-D float32."""
         encodings = self._mdp.lossless_state_encoding(self._state)
         obs = {}
@@ -355,7 +356,7 @@ class OvercookedPettingZooEnv:
             obs[agent] = enc
         return obs
 
-    def _get_dense_observations(self) -> Dict[str, np.ndarray]:
+    def _get_dense_observations(self) -> dict[str, np.ndarray]:
         """Compact hand-crafted feature vector per agent."""
         state = self._state
         players = state.players

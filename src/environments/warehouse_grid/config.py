@@ -1,8 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class FaultProfile:
     # --- Burst failure ---
     # Robot works fine then suddenly enters permanent failure.
@@ -24,7 +23,7 @@ class FaultProfile:
     congestion_factor: float = 0.1  # packet_loss += factor * local_density
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class WarehouseConfig:
     grid_height: int = 12
     grid_width: int = 16
@@ -57,7 +56,7 @@ class WarehouseConfig:
     # Episode configuration
     max_cycles: int = 500
 
-    comm_range: Optional[int] = None  # max grid-cell distance for observing others
+    comm_range: int | None = None  # max grid-cell distance for observing others
 
     enable_task_deadlines: bool = False
     task_arrival_rate: float = 0.5  # Poisson λ — expected new tasks per step
@@ -93,4 +92,6 @@ class WarehouseConfig:
     def __post_init__(self):
         """Cast plain dicts into typed dataclasses."""
         if isinstance(self.fault_profile, dict):
-            self.fault_profile = FaultProfile(**self.fault_profile)
+            object.__setattr__(
+                self, "fault_profile", FaultProfile(**self.fault_profile)
+            )

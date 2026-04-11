@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import functools
-from typing import Optional
 
 import flax
 import jax
@@ -67,8 +66,8 @@ class AdamW:
                 self,
                 grad: jax.Array,
                 model: Model,
-                lr: Optional[float] = None,
-            ) -> "Optimizer":
+                lr: float | None = None,
+            ) -> Optimizer:
                 if lr is None:
                     optimizer_state, model.state_dict = _step(
                         self.transformation, grad, self.state, model.state_dict

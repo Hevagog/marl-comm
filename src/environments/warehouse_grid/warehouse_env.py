@@ -17,7 +17,8 @@ Features
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Mapping, Tuple
+from typing import Any, Literal
+from collections.abc import Mapping
 
 import numpy as np
 import gymnasium
@@ -202,7 +203,7 @@ class MultiRobotWarehouseEnv:
         self,
         seed: int | None = None,
         **kwargs: Any,
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
@@ -221,7 +222,7 @@ class MultiRobotWarehouseEnv:
         self._agents = [f"agent_{i}" for i in range(self._config.num_agents)]
 
         observations = self._get_observations()
-        infos: Dict[str, dict] = {
+        infos: dict[str, dict] = {
             a: self._build_info(int(a.split("_")[1])) for a in self._possible_agents
         }
         return observations, infos
@@ -229,12 +230,12 @@ class MultiRobotWarehouseEnv:
     def step(
         self,
         actions: Mapping[str, int | np.integer],
-    ) -> Tuple[
-        Dict[str, np.ndarray],
-        Dict[str, float],
-        Dict[str, bool],
-        Dict[str, bool],
-        Dict[str, dict],
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, float],
+        dict[str, bool],
+        dict[str, bool],
+        dict[str, dict],
     ]:
         if self._state is None:
             raise RuntimeError("Environment must be reset before calling step()")
@@ -301,10 +302,10 @@ class MultiRobotWarehouseEnv:
         # --- 11. Observations & return dicts ---
         observations = self._get_observations()
 
-        rewards: Dict[str, float] = {}
-        terminated_dict: Dict[str, bool] = {}
-        truncated_dict: Dict[str, bool] = {}
-        infos: Dict[str, dict] = {}
+        rewards: dict[str, float] = {}
+        terminated_dict: dict[str, bool] = {}
+        truncated_dict: dict[str, bool] = {}
+        infos: dict[str, dict] = {}
 
         for agent in self._possible_agents:
             idx = int(agent.split("_")[1])
@@ -325,7 +326,7 @@ class MultiRobotWarehouseEnv:
 
         return observations, rewards, terminated_dict, truncated_dict, infos
 
-    def _get_observations(self) -> Dict[str, np.ndarray]:
+    def _get_observations(self) -> dict[str, np.ndarray]:
         assert self._state is not None
         observations = {}
         for agent in self._possible_agents:

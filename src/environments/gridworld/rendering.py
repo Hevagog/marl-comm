@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Tuple
+from typing import TYPE_CHECKING, Tuple
+from collections.abc import Iterable
 
 import numpy as np
 import pygame
@@ -93,13 +94,13 @@ class GridworldRenderer:
     def render(
         self,
         *,
-        agent_positions: dict[str, Tuple[int, int]],
+        agent_positions: dict[str, tuple[int, int]],
         step: int,
         max_steps: int,
-        coins: dict[str, Tuple[int, int] | None] | None = None,
-        traps: Iterable[Tuple[int, int]] | None = None,
-        goal: Tuple[int, int] | None = None,
-        vision_center: Tuple[int, int] | None = None,
+        coins: dict[str, tuple[int, int] | None] | None = None,
+        traps: Iterable[tuple[int, int]] | None = None,
+        goal: tuple[int, int] | None = None,
+        vision_center: tuple[int, int] | None = None,
         vision_range: int | None = None,
         reached_goal: dict[str, bool] | None = None,
         messages: dict[str, int] | None = None,
@@ -157,7 +158,7 @@ class GridworldRenderer:
         cs = self._cell_size
         return pygame.Rect(x * cs, y * cs, cs, cs)
 
-    def _cell_center(self, x: int, y: int) -> Tuple[int, int]:
+    def _cell_center(self, x: int, y: int) -> tuple[int, int]:
         cs = self._cell_size
         return (x * cs + cs // 2, y * cs + cs // 2)
 
@@ -194,7 +195,7 @@ class GridworldRenderer:
             )
 
     def _draw_vision(
-        self, canvas: Surface, center: Tuple[int, int], vision_range: int
+        self, canvas: Surface, center: tuple[int, int], vision_range: int
     ) -> None:
         vx, vy = center
         for dx in range(-vision_range, vision_range + 1):
@@ -204,7 +205,7 @@ class GridworldRenderer:
                     rect = self._cell_rect(px, py)
                     pygame.draw.rect(canvas, self._style.vision_color, rect)
 
-    def _draw_goal(self, canvas: Surface, goal: Tuple[int, int]) -> None:
+    def _draw_goal(self, canvas: Surface, goal: tuple[int, int]) -> None:
         gx, gy = goal
         pygame.draw.circle(
             canvas,
@@ -213,7 +214,7 @@ class GridworldRenderer:
             max(self._cell_size // 3, 4),
         )
 
-    def _draw_traps(self, canvas: Surface, traps: Iterable[Tuple[int, int]]) -> None:
+    def _draw_traps(self, canvas: Surface, traps: Iterable[tuple[int, int]]) -> None:
         cs = self._cell_size
         for tx, ty in traps:
             rect = pygame.Rect(tx * cs + cs // 4, ty * cs + cs // 4, cs // 2, cs // 2)
@@ -233,7 +234,7 @@ class GridworldRenderer:
         pygame.draw.polygon(canvas, outline, points, 2)
 
     def _draw_coins(
-        self, canvas: Surface, coins: dict[str, Tuple[int, int] | None]
+        self, canvas: Surface, coins: dict[str, tuple[int, int] | None]
     ) -> None:
         cs = self._cell_size
         half = max(cs // 5, 4)
@@ -247,7 +248,7 @@ class GridworldRenderer:
     def _draw_agents(
         self,
         canvas: Surface,
-        agent_positions: dict[str, Tuple[int, int]],
+        agent_positions: dict[str, tuple[int, int]],
         reached_goal: dict[str, bool] | None,
     ) -> None:
         cs = self._cell_size

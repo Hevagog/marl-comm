@@ -15,7 +15,6 @@ Provides
 from __future__ import annotations
 
 import os
-from typing import List
 
 import numpy as np
 
@@ -872,7 +871,7 @@ class VideoRecorder:
     def __init__(self, video_dir: str = "recordings", fps: int = 10):
         self._video_dir = video_dir
         self._fps = fps
-        self._frames: List[np.ndarray] = []
+        self._frames: list[np.ndarray] = []
         self._episode_name = "episode"
 
     def start(self, episode_name: str = "episode"):

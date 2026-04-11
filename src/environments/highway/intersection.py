@@ -23,7 +23,8 @@ Action space
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Mapping, Tuple
+from typing import Any, Literal
+from collections.abc import Mapping
 
 import gymnasium
 import numpy as np
@@ -169,7 +170,7 @@ class IntersectionPettingZooEnv:
 
     def reset(
         self, seed: int | None = None, **kwargs
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         raw_obs, info = self._env.reset(seed=seed, **kwargs)
         self._agents = list(self._possible_agents)
         obs = self._split_observations(raw_obs)
@@ -179,12 +180,12 @@ class IntersectionPettingZooEnv:
 
     def step(
         self, actions: Mapping[str, int | np.integer]
-    ) -> Tuple[
-        Dict[str, np.ndarray],
-        Dict[str, float],
-        Dict[str, bool],
-        Dict[str, bool],
-        Dict[str, dict],
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, float],
+        dict[str, bool],
+        dict[str, bool],
+        dict[str, dict],
     ]:
         # Build tuple action for highway-env multi-agent
         action_tuple = tuple(int(actions[a]) for a in self._possible_agents)
@@ -229,7 +230,7 @@ class IntersectionPettingZooEnv:
     def close(self):
         return self._env.close()
 
-    def _split_observations(self, raw_obs: Any) -> Dict[str, np.ndarray]:
+    def _split_observations(self, raw_obs: Any) -> dict[str, np.ndarray]:
         """Split highway-env multi-agent observation into per-agent dicts."""
         obs = {}
         raw = np.asarray(raw_obs)

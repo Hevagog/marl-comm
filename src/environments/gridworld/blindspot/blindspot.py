@@ -26,7 +26,8 @@ Actions (with communication, M tokens): movement * M + token
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Mapping, Tuple
+from typing import Any, Literal
+from collections.abc import Mapping
 
 import gymnasium
 import numpy as np
@@ -194,7 +195,7 @@ class BlindSpotEnv:
 
     def reset(
         self, seed: int | None = None, **kwargs: Any
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, dict]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         """Reset the environment and randomise trap positions.
 
         Parameters
@@ -230,7 +231,7 @@ class BlindSpotEnv:
         self._traps = self._place_traps()
 
         obs = self._get_observations()
-        infos: Dict[str, dict] = {a: {"goal": self._goal} for a in self._agents}
+        infos: dict[str, dict] = {a: {"goal": self._goal} for a in self._agents}
         return obs, infos
 
     def randomize_goal(self) -> tuple[int, int]:
@@ -267,12 +268,14 @@ class BlindSpotEnv:
         idx = int(self._rng.integers(0, len(pool)))
         return pool[idx]
 
-    def step(self, actions: Mapping[str, int | np.integer]) -> Tuple[
-        Dict[str, np.ndarray],
-        Dict[str, float],
-        Dict[str, bool],
-        Dict[str, bool],
-        Dict[str, dict],
+    def step(
+        self, actions: Mapping[str, int | np.integer]
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, float],
+        dict[str, bool],
+        dict[str, bool],
+        dict[str, dict],
     ]:
         """Execute one timestep.
 
@@ -290,7 +293,7 @@ class BlindSpotEnv:
         """
         self._step_count += 1
 
-        rewards: Dict[str, float] = {a: 0.0 for a in self._possible_agents}
+        rewards: dict[str, float] = {a: 0.0 for a in self._possible_agents}
 
         for agent in self._possible_agents:
             # Agents that already reached the goal stay put
@@ -347,14 +350,14 @@ class BlindSpotEnv:
         all_reached = all(self._reached_goal[a] for a in self._possible_agents)
         time_up = self._step_count >= self._config.max_cycles
 
-        terminated: Dict[str, bool] = {a: all_reached for a in self._possible_agents}
-        truncated: Dict[str, bool] = {
+        terminated: dict[str, bool] = {a: all_reached for a in self._possible_agents}
+        truncated: dict[str, bool] = {
             a: (time_up and not all_reached) for a in self._possible_agents
         }
 
         obs = self._get_observations()
 
-        infos: Dict[str, dict] = {
+        infos: dict[str, dict] = {
             a: {
                 "reached_goal": self._reached_goal[a],
                 "step": self._step_count,
@@ -569,7 +572,7 @@ class BlindSpotEnv:
 
         return [all_cells[i] for i in indices]
 
-    def _get_observations(self) -> Dict[str, np.ndarray]:
+    def _get_observations(self) -> dict[str, np.ndarray]:
         """Build per-agent observation vectors.
 
         Both agents receive a float32 vector:
@@ -610,7 +613,7 @@ class BlindSpotEnv:
         only traps that agent can see.
         """
         gs = float(max(self._config.grid_size - 1, 1))  # for normalisation
-        obs: Dict[str, np.ndarray] = {}
+        obs: dict[str, np.ndarray] = {}
 
         for i, agent in enumerate(self._possible_agents):
             partner = self._possible_agents[1 - i]

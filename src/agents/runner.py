@@ -330,7 +330,7 @@ class BaseRunner(ABC):
         except ImportError:
             pass
 
-    def _rebuild_flatland_env(self, flatland_cfg: "FlatlandConfig"):
+    def _rebuild_flatland_env(self, flatland_cfg: FlatlandConfig):
         """Rebuild the vectorised Flatland env with a new stage config.
 
         We import here (not at module top) to keep ``BaseRunner`` importable
@@ -602,7 +602,7 @@ class BaseRunner(ABC):
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_flatland_figures(data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "warehouse":
+        elif env_id in ("warehouse", "warehouse-jax"):
             if self._cfg.get("experiment", {}).get("agent_type") == "magic":
                 from utils import (
                     MAGICWarehouseCommCollector,
