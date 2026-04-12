@@ -29,6 +29,12 @@ from agents.shared.mamba_blocks import BiMamba, CrossMamba, FIFOBuffer, Mamba
 
 _HIDDEN_GAIN = jnp.sqrt(2.0)
 _OUTPUT_GAIN = 0.01
+# Residual MLP branches in Encode/DecodeBlock should NOT use 0.01 gain.
+# That gain is intended only for the final logit projection (Decoder.head).
+# Using 0.01 in residual paths creates a gradient bottleneck: the encoder
+# receives ~30,000x weaker gradients than the head, preventing it from
+# learning useful obs_rep.  1.0 preserves residual signal flow.
+_RESIDUAL_GAIN = 1.0
 
 
 class EncodeBlock(nn.Module):
@@ -54,7 +60,7 @@ class EncodeBlock(nn.Module):
             [
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
-                nn.Dense(self.n_embd, kernel_init=orthogonal(_OUTPUT_GAIN)),
+                nn.Dense(self.n_embd, kernel_init=orthogonal(_RESIDUAL_GAIN)),
             ]
         )
 
@@ -130,7 +136,7 @@ class DecodeBlock(nn.Module):
             [
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
-                nn.Dense(self.n_embd, kernel_init=orthogonal(_OUTPUT_GAIN)),
+                nn.Dense(self.n_embd, kernel_init=orthogonal(_RESIDUAL_GAIN)),
             ]
         )
 
