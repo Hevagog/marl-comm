@@ -29,12 +29,6 @@ from agents.shared.mamba_blocks import BiMamba, CrossMamba, FIFOBuffer, Mamba
 
 _HIDDEN_GAIN = jnp.sqrt(2.0)
 _OUTPUT_GAIN = 0.01
-# Residual MLP branches in Encode/DecodeBlock should NOT use 0.01 gain.
-# That gain is intended only for the final logit projection (Decoder.head).
-# Using 0.01 in residual paths creates a gradient bottleneck: the encoder
-# receives ~30,000x weaker gradients than the head, preventing it from
-# learning useful obs_rep.  1.0 preserves residual signal flow.
-_RESIDUAL_GAIN = 1.0
 
 
 class EncodeBlock(nn.Module):
@@ -60,7 +54,7 @@ class EncodeBlock(nn.Module):
             [
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
-                nn.Dense(self.n_embd, kernel_init=orthogonal(_RESIDUAL_GAIN)),
+                nn.Dense(self.n_embd, kernel_init=orthogonal(_OUTPUT_GAIN)),
             ]
         )
 
@@ -136,7 +130,7 @@ class DecodeBlock(nn.Module):
             [
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
-                nn.Dense(self.n_embd, kernel_init=orthogonal(_RESIDUAL_GAIN)),
+                nn.Dense(self.n_embd, kernel_init=orthogonal(_OUTPUT_GAIN)),
             ]
         )
 
@@ -254,34 +248,25 @@ class Decoder(nn.Module):
         """
         x = self.ln(self.action_encoder(shifted_action))
 
-        if self.n_block == 1:
-            x, s_hs, s_buf, c_hs, c_buf = self.blocks[0].recurrent(
+        for i, block in enumerate(self.blocks):
+            s_hs = self_hs_all[:, i, :, :, :]
+            s_buf = self_buf_all[:, i, :, :]
+            c_hs = cross_hs_all[:, i, :, :, :]
+            c_buf = cross_buf_all[:, i, :, :]
+
+            x, s_hs_new, s_buf_new, c_hs_new, c_buf_new = block.recurrent(
                 x,
                 obs_rep,
-                self_hs_all[:, 0],
-                self_buf_all[:, 0],
-                cross_hs_all[:, 0],
-                cross_buf_all[:, 0],
+                s_hs,
+                s_buf,
+                c_hs,
+                c_buf,
             )
-            self_hs_all = s_hs[:, None]
-            self_buf_all = s_buf[:, None]
-            cross_hs_all = c_hs[:, None]
-            cross_buf_all = c_buf[:, None]
-        else:
-            for i, block in enumerate(self.blocks):
-                x, s_hs_new, s_buf_new, c_hs_new, c_buf_new = block.recurrent(
-                    x,
-                    obs_rep,
-                    self_hs_all[:, i],
-                    self_buf_all[:, i],
-                    cross_hs_all[:, i],
-                    cross_buf_all[:, i],
-                )
 
-                self_hs_all = self_hs_all.at[:, i].set(s_hs_new)
-                self_buf_all = self_buf_all.at[:, i].set(s_buf_new)
-                cross_hs_all = cross_hs_all.at[:, i].set(c_hs_new)
-                cross_buf_all = cross_buf_all.at[:, i].set(c_buf_new)
+            self_hs_all = self_hs_all.at[:, i, :, :, :].set(s_hs_new)
+            self_buf_all = self_buf_all.at[:, i, :, :].set(s_buf_new)
+            cross_hs_all = cross_hs_all.at[:, i, :, :, :].set(c_hs_new)
+            cross_buf_all = cross_buf_all.at[:, i, :, :].set(c_buf_new)
 
         logits = self.head(x)
         return logits, self_hs_all, self_buf_all, cross_hs_all, cross_buf_all
@@ -393,56 +378,59 @@ class MAMPolicyNet(CategoricalMixin, Model):
         n: int,
         act_dim: int,
     ):
-        """Autoregressive per-agent action generation using jax.lax.scan.
+        """Autoregressive per-agent action generation.
 
         Returns (actions_flat, {"log_probs": ..., "autoregressive": True}).
         """
         d_inner = self.n_embd * 2
-        decoder = self._decoder
-        obs_rep_per_agent = jnp.swapaxes(obs_rep, 0, 1)[:, :, None, :]
+
+        # Init shifted actions
+        shifted = jnp.zeros((groups, n, act_dim + 1))
+        shifted = shifted.at[:, 0, 0].set(1)
+
+        output_actions = jnp.zeros((groups, n), dtype=jnp.int32)
+        output_log_probs = jnp.zeros((groups, n))
+
+        # Init recurrent state for decoder
         hs_shape = (groups, self.n_block, 1, d_inner, self.d_state)
         buf_shape = (groups, self.n_block, self.d_conv, d_inner)
-        start_shifted = jnp.zeros((groups, 1, act_dim + 1))
-        start_shifted = start_shifted.at[:, 0, 0].set(1.0)
+        self_hs = jnp.zeros(hs_shape)
+        self_buf = FIFOBuffer.init(buf_shape)
+        cross_hs = jnp.zeros(hs_shape)
+        cross_buf = FIFOBuffer.init(buf_shape)
 
-        init_carry = (
-            jnp.zeros(hs_shape),
-            FIFOBuffer.init(buf_shape),
-            jnp.zeros(hs_shape),
-            FIFOBuffer.init(buf_shape),
-            key,
-            start_shifted,
-        )
-
-        def _scan_body(carry, obs_rep_i):
-            self_hs, self_buf, cross_hs, cross_buf, rng, cur_shifted = carry
-
-            logits_i, self_hs, self_buf, cross_hs, cross_buf = decoder.recurrent_step(
-                cur_shifted, obs_rep_i, self_hs, self_buf, cross_hs, cross_buf
+        for i in range(n):
+            logits_i, self_hs, self_buf, cross_hs, cross_buf = (
+                self._decoder.recurrent_step(
+                    shifted[:, i : i + 1, :],
+                    obs_rep[:, i : i + 1, :],
+                    self_hs,
+                    self_buf,
+                    cross_hs,
+                    cross_buf,
+                )
             )
             logits_i = logits_i.squeeze(1)  # (groups, act_dim)
 
-            rng, subkey = jax.random.split(rng)
+            key, subkey = jax.random.split(key)
             action_i = jax.random.categorical(subkey, logits_i)  # (groups,)
             log_probs_i = jax.nn.log_softmax(logits_i)
             log_prob_i = jnp.take_along_axis(
                 log_probs_i, action_i[:, None], axis=-1
             ).squeeze(-1)
 
-            next_shifted = jnp.zeros((groups, 1, act_dim + 1))
-            next_shifted = next_shifted.at[:, 0, 1:].set(
-                jax.nn.one_hot(action_i, act_dim)
-            )
+            output_actions = output_actions.at[:, i].set(action_i)
+            output_log_probs = output_log_probs.at[:, i].set(log_prob_i)
 
-            new_carry = (self_hs, self_buf, cross_hs, cross_buf, rng, next_shifted)
-            return new_carry, (action_i, log_prob_i)
+            # Update shifted action for next agent
+            if i + 1 < n:
+                shifted = shifted.at[:, i + 1, 1:].set(
+                    jax.nn.one_hot(action_i, act_dim)
+                )
 
-        _, (all_actions, all_log_probs) = jax.lax.scan(
-            _scan_body, init_carry, obs_rep_per_agent
-        )
-
-        actions_flat = all_actions.T.reshape(-1)[:, None]  # (B, 1)
-        log_probs_flat = all_log_probs.T.reshape(-1)[:, None]  # (B, 1)
+        # Flatten: (groups, n) → (groups*n,) = (B,)
+        actions_flat = output_actions.reshape(-1)[:, None]  # (B, 1)
+        log_probs_flat = output_log_probs.reshape(-1)[:, None]  # (B, 1)
 
         return actions_flat, {"log_probs": log_probs_flat, "autoregressive": True}
 

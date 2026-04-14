@@ -16,7 +16,7 @@ References
 
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 import jax
 import jax.numpy as jnp
@@ -46,7 +46,8 @@ class CommFormerMAPPO(CategoricalMAPPO):
     def act(
         self,
         states: Mapping[str, np.ndarray | jax.Array],
-        **kwargs,
+        timestep: int,
+        timesteps: int,
     ) -> tuple:
         """Stack all agents' observations and call the shared policy once.
 
@@ -64,19 +65,41 @@ class CommFormerMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         policy = self.policies[uid0]
 
-        # Stack observations from all agents: (num_agents * num_envs, obs_dim)
-        stacked_obs = jnp.concatenate(
-            [
-                self._state_preprocessor[uid](states[uid])
-                for uid in self.possible_agents
-            ],
-            axis=0,
+        # Stack observations env-major: (num_envs, N, obs_dim) → (N*num_envs, obs_dim).
+        # Each consecutive block of N rows = all N agents in the same environment.
+        # This matches the interleaved layout produced by _shuffle_buffer_indices
+        # during the PPO update, so rollout and training log-probs are consistent.
+        #
+        # BUG-C-003 fix: the previous agent-major concatenation (axis=0) placed
+        # all environments of agent-0 first, then agent-1, etc.  After reshape
+        # to (groups=num_envs, N, hidden_dim) in the policy, each "group" ended up
+        # containing observations from the SAME agent across different environments
+        # rather than DIFFERENT agents in the same environment.  The encoder's
+        # communication was therefore between environment-copies of one agent —
+        # completely wrong semantics.  At training time the interleaved buffer
+        # correctly groups N agents per timestep, so rollout and training
+        # log-probs were computed under different data distributions →
+        # ratio_max_abs_dev ≈ 1.8, ratio_clipped_frac ≈ 0.4, near-zero learning.
+        preprocessed = [
+            self._state_preprocessor[uid](states[uid])
+            for uid in self.possible_agents
+        ]
+        # preprocessed[i]: (num_envs, obs_dim)
+        # stack → (num_envs, N, obs_dim), reshape → (N*num_envs, obs_dim)
+        stacked_obs = jnp.stack(preprocessed, axis=1).reshape(
+            -1, preprocessed[0].shape[-1]
         )
 
+        # Generate autoregressive key for execution-time decoding.
+        with jax.default_device(policy.device):
+            policy._c_i += 1
+            ar_key = jax.random.fold_in(policy._c_key, policy._c_i)  # type: ignore[attr-defined]
+
         actions_all, log_prob_all, outputs_all = policy.act(
-            {"states": stacked_obs},
+            {"states": stacked_obs, "ar_key": ar_key},
             role="policy",
         )
+        assert log_prob_all is not None, "log_prob_all should not be None in AR mode"
 
         # Split results per agent
         n = len(self.possible_agents)
@@ -95,7 +118,10 @@ class CommFormerMAPPO(CategoricalMAPPO):
                     # Graph tensors are shared — pass unsliced to preserve shape.
                     outputs[uid][k] = v
                 elif isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)):
-                    outputs[uid][k] = v[s]
+                    if v.ndim == 0:
+                        outputs[uid][k] = v
+                    else:
+                        outputs[uid][k] = v[s]
                 else:
                     outputs[uid][k] = v
 

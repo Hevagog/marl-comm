@@ -52,11 +52,9 @@ class MAMMAPPO(CategoricalMAPPO):
         """Stack all agents' observations and do autoregressive action selection.
 
         The base MAPPO.act() calls each agent's policy individually.
-        We pack all agents into a single batch with **env-major** layout
-        ``[e0_a0, e0_a1, …, e0_a(N-1), e1_a0, …]`` so that
-        ``MAMPolicyNet.__call__``'s ``x.reshape(num_envs, num_agents, -1)``
-        yields a per-env group of co-occurring agents — the input
-        structure the BiMamba encoder is designed for.
+        By concatenating observations from all agents we get
+        ``batch_size = num_agents * num_envs``, allowing the MAM
+        encoder-decoder to run over the full agent group.
 
         An ``ar_key`` is injected into the inputs so MAMPolicyNet
         uses autoregressive decoding (sequential per-agent generation
@@ -66,14 +64,14 @@ class MAMMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         policy: Model = self.policies[uid0]  # type: ignore[assignment]
 
-        per_agent_obs = [
-            self._state_preprocessor[uid](states[uid])  # (num_envs, obs_dim)
-            for uid in self.possible_agents
-        ]
-        # (num_envs, num_agents, obs_dim) row-major flatten →
-        # [e0_a0, e0_a1, …, e0_a(N-1), e1_a0, …]
-        obs_dim = per_agent_obs[0].shape[-1]
-        stacked_obs = jnp.stack(per_agent_obs, axis=1).reshape(-1, obs_dim)
+        # Stack observations from all agents: (num_agents * num_envs, obs_dim)
+        stacked_obs = jnp.concatenate(
+            [
+                self._state_preprocessor[uid](states[uid])
+                for uid in self.possible_agents
+            ],
+            axis=0,
+        )
 
         # Generate autoregressive key for this timestep
         with jax.default_device(policy.device):
@@ -87,31 +85,21 @@ class MAMMAPPO(CategoricalMAPPO):
         # In autoregressive mode (ar_key provided), log_prob_all is always returned
         assert log_prob_all is not None, "log_prob_all should not be None in AR mode"
 
-        # Deinterleave by reshaping leading axis (num_envs * num_agents,) →
-        # (num_envs, num_agents). Agent i lives at [:, i].
+        # Split results per agent
         n = len(self.possible_agents)
         num_envs = stacked_obs.shape[0] // n
         actions: dict[str, jax.Array] = {}
         log_prob: dict[str, jax.Array] = {}
         outputs: dict[str, dict] = {}
 
-        actions_grouped = actions_all.reshape((num_envs, n) + actions_all.shape[1:])
-        log_prob_grouped = log_prob_all.reshape(
-            (num_envs, n) + log_prob_all.shape[1:]
-        )
-
         for i, uid in enumerate(self.possible_agents):
-            actions[uid] = actions_grouped[:, i]
-            log_prob[uid] = log_prob_grouped[:, i]
+            s = slice(i * num_envs, (i + 1) * num_envs)
+            actions[uid] = actions_all[s]
+            log_prob[uid] = log_prob_all[s]
             outputs[uid] = {}
             for k, v in outputs_all.items():
-                if (
-                    isinstance(v, (jnp.ndarray, np.ndarray, jax.Array))
-                    and v.ndim >= 1
-                    and v.shape[0] == num_envs * n
-                ):
-                    grouped = v.reshape((num_envs, n) + v.shape[1:])
-                    outputs[uid][k] = grouped[:, i]
+                if isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)) and v.ndim >= 1:
+                    outputs[uid][k] = v[s]
                 else:
                     outputs[uid][k] = v
 
@@ -140,4 +128,18 @@ class MAMMAPPO(CategoricalMAPPO):
 
         so each consecutive block of N rows is a valid agent group.
         """
-        return self._shuffle_grouped_buffer_indices(buffer_size)
+        n = len(self.possible_agents)
+        assert buffer_size % n == 0, (
+            f"MAM pooled buffer ({buffer_size}) not divisible by num_agents ({n}). "
+            "Adjust rollouts, num_envs, or mini_batches to satisfy: "
+            "(rollouts * num_envs * num_agents) % (mini_batches * num_agents) == 0."
+        )
+        M = buffer_size // n  # timesteps per agent
+
+        ts_perm = np.random.permutation(M)
+
+        paired = np.empty(buffer_size, dtype=np.intp)
+        for a in range(n):
+            paired[a::n] = ts_perm + a * M
+
+        return paired
