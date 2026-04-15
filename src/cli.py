@@ -29,6 +29,10 @@ def _get_runner(agent_type: str):
         from agents.mam.train import MAMRunner
 
         return MAMRunner
+    if agent_type == "mam_enc_only":
+        from agents.mam.train_ablations import MAMEncOnlyRunner
+
+        return MAMEncOnlyRunner
     if agent_type == "etmat":
         from agents.etmat.train import ETMATRunner
 
@@ -42,7 +46,7 @@ def _get_runner(agent_type: str):
 
         return CommFormerHMRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'etmat', 'mamhm', 'commformerhm']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm']}"
     )
 
 

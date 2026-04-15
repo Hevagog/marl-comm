@@ -282,6 +282,16 @@ class MAMPolicyNet(CategoricalMixin, Model):
     - **Parallel** (training): ``taken_actions`` present in inputs → teacher forcing.
     - **Autoregressive** (rollout): ``ar_key`` present → sequential per-agent decode.
     - **Fallback**: zero start tokens → independent per-agent logits.
+
+    Ablation 3 parameters
+    ---------------------
+    sort_agents_by_type : bool
+        When True, agents are reordered by type (agent_idx % type_cycle_len) before
+        being passed to the encoder and decoder.  This groups same-type agents
+        consecutively so the AR chain conditions on within-type ordering first.
+        Logits are unsorting back to original agent order before returning.
+    type_cycle_len : int
+        Number of distinct agent types.  Agent i has type ``i % type_cycle_len``.
     """
 
     n_embd: int = 128
@@ -302,6 +312,8 @@ class MAMPolicyNet(CategoricalMixin, Model):
         d_conv: int = 4,
         delta_rank: int = 128,
         unnormalized_log_prob: bool = True,
+        sort_agents_by_type: bool = False,
+        type_cycle_len: int = 3,
         device=None,
         **kwargs: Any,
     ):
@@ -313,6 +325,22 @@ class MAMPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "d_state", int(d_state))
         object.__setattr__(self, "d_conv", int(d_conv))
         object.__setattr__(self, "delta_rank", int(delta_rank))
+        object.__setattr__(self, "sort_agents_by_type", bool(sort_agents_by_type))
+        object.__setattr__(self, "type_cycle_len", int(type_cycle_len))
+
+        # Precompute sort / inverse-sort permutations (static, no trainable params)
+        if sort_agents_by_type:
+            n = int(num_agents)
+            cycle = int(type_cycle_len)
+            types = np.array([i % cycle for i in range(n)])
+            sort_perm = np.argsort(types, kind="stable")
+            inv_perm = np.empty_like(sort_perm)
+            inv_perm[sort_perm] = np.arange(n)
+            object.__setattr__(self, "_sort_perm", sort_perm)
+            object.__setattr__(self, "_inv_perm", inv_perm)
+        else:
+            object.__setattr__(self, "_sort_perm", None)
+            object.__setattr__(self, "_inv_perm", None)
 
     def setup(self) -> None:
         obs_dim = self.observation_space.shape[0]
@@ -348,6 +376,12 @@ class MAMPolicyNet(CategoricalMixin, Model):
         groups = b // n
         obs_grouped = x.reshape(groups, n, -1)
 
+        # Ablation 3: sort agents by type before encoding
+        sort_perm = self._sort_perm
+        inv_perm = self._inv_perm
+        if sort_perm is not None:
+            obs_grouped = obs_grouped[:, sort_perm, :]
+
         obs_rep = self._encoder(obs_grouped)
 
         # Decoder: parallel (teacher forcing) or zero-start
@@ -356,18 +390,28 @@ class MAMPolicyNet(CategoricalMixin, Model):
             actions_int = taken_actions.reshape(b).astype(jnp.int32)
             one_hot = jax.nn.one_hot(actions_int, act_dim)
             oh_grouped = one_hot.reshape(groups, n, act_dim)
+            if sort_perm is not None:
+                # Sort one-hot actions to match sorted obs order, then rebuild shift
+                oh_grouped = oh_grouped[:, sort_perm, :]
             shifted = jnp.zeros((groups, n, act_dim + 1))
             shifted = shifted.at[:, 0, 0].set(1)  # start token
             shifted = shifted.at[:, 1:, 1:].set(oh_grouped[:, :-1, :])
         elif ar_key is not None:
-            # Autoregressive rollout
-            return self._autoregressive_decode(obs_rep, ar_key, groups, n, act_dim)
+            # Autoregressive rollout (obs_rep already sorted if sort enabled)
+            return self._autoregressive_decode(
+                obs_rep, ar_key, groups, n, act_dim, inv_perm
+            )
         else:
             # Zero start token (no taken_actions, no ar_key)
             shifted = jnp.zeros((groups, n, act_dim + 1))
             shifted = shifted.at[:, 0, 0].set(1)
 
         logits = self._decoder(shifted, obs_rep, obs_grouped)  # (groups, n, act_dim)
+
+        # Unsort logits back to original agent order
+        if inv_perm is not None:
+            logits = logits[:, inv_perm, :]
+
         return logits.reshape(b, act_dim), {}
 
     def _autoregressive_decode(
@@ -377,8 +421,12 @@ class MAMPolicyNet(CategoricalMixin, Model):
         groups: int,
         n: int,
         act_dim: int,
+        inv_perm: np.ndarray | None = None,
     ):
         """Autoregressive per-agent action generation.
+
+        obs_rep is assumed to already be sorted (if sort_agents_by_type is set).
+        inv_perm maps sorted positions back to original agent indices for output.
 
         Returns (actions_flat, {"log_probs": ..., "autoregressive": True}).
         """
@@ -419,18 +467,26 @@ class MAMPolicyNet(CategoricalMixin, Model):
                 log_probs_i, action_i[:, None], axis=-1
             ).squeeze(-1)
 
-            output_actions = output_actions.at[:, i].set(action_i)
-            output_log_probs = output_log_probs.at[:, i].set(log_prob_i)
+            # Ablation 3: store at original agent index if sorted
+            out_idx = int(inv_perm[i]) if inv_perm is not None else i
+            output_actions = output_actions.at[:, out_idx].set(action_i)
+            output_log_probs = output_log_probs.at[:, out_idx].set(log_prob_i)
 
-            # Update shifted action for next agent
+            # Update shifted action for next sorted agent
             if i + 1 < n:
                 shifted = shifted.at[:, i + 1, 1:].set(
                     jax.nn.one_hot(action_i, act_dim)
                 )
 
         # Flatten: (groups, n) → (groups*n,) = (B,)
-        actions_flat = output_actions.reshape(-1)[:, None]  # (B, 1)
-        log_probs_flat = output_log_probs.reshape(-1)[:, None]  # (B, 1)
+        # Reorder so output is in original agent order: agent 0 rows first, then 1, ...
+        # output_actions[g, a] = action for original agent a in group g
+        # We need flat order: [ag0_g0, ag0_g1, ..., ag1_g0, ag1_g1, ...] = agent-major
+        # The buffer layout (how MAMMAPPO.act slices) expects:
+        #   actions_all[i*num_envs : (i+1)*num_envs] = agent i's actions
+        # output_actions is (groups, n); transposing and flattening gives agent-major
+        actions_flat = output_actions.T.reshape(-1)[:, None]  # (B, 1), agent-major
+        log_probs_flat = output_log_probs.T.reshape(-1)[:, None]  # (B, 1)
 
         return actions_flat, {"log_probs": log_probs_flat, "autoregressive": True}
 
