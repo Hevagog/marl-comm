@@ -18,6 +18,10 @@ from environments.vectorized import (
     make_vectorized_env,
 )
 from environments.warehouse_grid import make_warehouse_env, WarehouseConfig
+from environments.continuous_coord import (
+    ContinuousCoordConfig,
+    make_continuous_coord_env,
+)
 
 __all__ = [
     "make_coin_game_env",
@@ -37,4 +41,6 @@ __all__ = [
     "make_vectorized_env",
     "WarehouseConfig",
     "make_warehouse_env",
+    "ContinuousCoordConfig",
+    "make_continuous_coord_env",
 ]

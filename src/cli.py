@@ -155,9 +155,22 @@ def _create_env_factory(
             config = WarehouseConfig(**config_kwargs)
             return partial(make_warehouse_env, config=config, render_mode=render_mode)
 
+        case "continuous_coord":
+            from environments import ContinuousCoordConfig, make_continuous_coord_env
+
+            config_kwargs = {
+                key: value
+                for key, value in env_cfg.items()
+                if key in ContinuousCoordConfig.__dataclass_fields__
+            }
+            config = ContinuousCoordConfig(**config_kwargs)
+            return partial(
+                make_continuous_coord_env, config=config, render_mode=render_mode
+            )
+
         case _:
             raise ValueError(
-                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'flatland', 'warehouse']"
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'flatland', 'warehouse', 'continuous_coord']"
             )
 
 
