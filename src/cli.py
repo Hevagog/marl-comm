@@ -45,8 +45,21 @@ def _get_runner(agent_type: str):
         from agents.commformerhm.commformerhm_runner import CommFormerHMRunner
 
         return CommFormerHMRunner
+    if agent_type == "mam_hopfield_pooling":
+        from agents.mam.train_ablations import MAMHopfieldPoolingRunner
+
+        return MAMHopfieldPoolingRunner
+    if agent_type == "mam_hopfield_layer":
+        from agents.mam.train_ablations import MAMHopfieldLayerRunner
+
+        return MAMHopfieldLayerRunner
+    if agent_type == "mam_et_encoder":
+        from agents.mam.train_ablations import MAMETEncoderRunner
+
+        return MAMETEncoderRunner
     raise ValueError(
-        f"Unknown agent_type '{agent_type}'. Registered types: {['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm']}"
+        f"Unknown agent_type '{agent_type}'. Registered types: "
+        f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder']}"
     )
 
 
