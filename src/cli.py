@@ -57,9 +57,13 @@ def _get_runner(agent_type: str):
         from agents.mam.train_ablations import MAMETEncoderRunner
 
         return MAMETEncoderRunner
+    if agent_type == "syncmixer":
+        from agents.syncmixer.train import SyncMixerRunner
+
+        return SyncMixerRunner
     raise ValueError(
         f"Unknown agent_type '{agent_type}'. Registered types: "
-        f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder']}"
+        f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder', 'syncmixer']}"
     )
 
 

@@ -182,6 +182,7 @@ def create_et_encoder_models(
     num_et_steps: int = mam_cfg.get("num_et_steps", 3)
     num_et_steps_eval: int = mam_cfg.get("num_et_steps_eval", 5)
     hn_activation: str = mam_cfg.get("hn_activation", "relu")
+    stop_grad_intermediate: bool = mam_cfg.get("stop_grad_intermediate", False)
 
     first_agent = possible_agents[0]
     obs_space = observation_spaces[first_agent]
@@ -210,6 +211,7 @@ def create_et_encoder_models(
         num_et_steps=num_et_steps,
         num_et_steps_eval=num_et_steps_eval,
         hn_activation=hn_activation,
+        stop_grad_intermediate=stop_grad_intermediate,
         unnormalized_log_prob=unnormalized_log_prob,
     )
 

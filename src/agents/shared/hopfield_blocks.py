@@ -293,11 +293,20 @@ class ETEncoderBlock(nn.Module):
         Number of energy minimization iterations (training default).
     hn_activation : str
         Hopfield activation: 'relu' or 'softmax'.
+    stop_grad_intermediate : bool
+        If True, apply stop_gradient to x after each step except the last.
+        This treats steps 1..T-1 as inference-only (no backprop through the
+        full iterative chain), leaving gradients only through the final step.
+        Prevents gradient explosion through T chained attention Jacobians —
+        equivalent to one-step implicit differentiation in DEQ models
+        (Bai et al. 2019, arXiv:1909.01377; Fung et al. 2022 arXiv:2305.13768).
 
     References
     ----------
     - Hoover et al. 2023: Energy Transformer architecture
     - Hoover et al. 2023, Theorem 1: dE/dt ≤ 0 convergence guarantee
+    - Bai et al. 2019: Deep Equilibrium Models (DEQ)
+    - Fung et al. 2022: One-step differentiation of iterative algorithms
     """
 
     d_model: int
@@ -307,6 +316,7 @@ class ETEncoderBlock(nn.Module):
     num_memories: int = 64
     num_steps: int = 3
     hn_activation: str = "relu"
+    stop_grad_intermediate: bool = False
 
     def setup(self) -> None:
         self.energy_attn = _EnergySelfAttention(
@@ -338,11 +348,19 @@ class ETEncoderBlock(nn.Module):
             Refined agent representations at the energy minimum.
         """
         T = num_steps if num_steps is not None else self.num_steps
-        for _ in range(T):
+        for t in range(T):
             g = self.ln(x)
             attn_update = self.energy_attn(g)
             hn_update = self.hopfield(g)
-            x = x + self.alpha * (attn_update + hn_update)
+            x_next = x + self.alpha * (attn_update + hn_update)
+            # Stop gradient through all but the final step to prevent
+            # gradient chain instability through T chained Jacobians.
+            # The forward pass (energy minimization) runs fully; only
+            # the backward pass is truncated to a single-step Jacobian.
+            if self.stop_grad_intermediate and t < T - 1:
+                x = jax.lax.stop_gradient(x_next)
+            else:
+                x = x_next
         return x
 
     def energy(self, x: jax.Array) -> jax.Array:

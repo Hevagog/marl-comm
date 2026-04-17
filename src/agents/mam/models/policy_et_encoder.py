@@ -69,6 +69,7 @@ class MAMETEncoderPolicyNet(CategoricalMixin, Model):
     num_et_steps: int = 3
     num_et_steps_eval: int = 5
     hn_activation: str = "relu"
+    stop_grad_intermediate: bool = False
 
     def __init__(
         self,
@@ -83,6 +84,7 @@ class MAMETEncoderPolicyNet(CategoricalMixin, Model):
         num_et_steps: int = 3,
         num_et_steps_eval: int = 5,
         hn_activation: str = "relu",
+        stop_grad_intermediate: bool = False,
         unnormalized_log_prob: bool = True,
         device=None,
         **kwargs: Any,
@@ -98,6 +100,7 @@ class MAMETEncoderPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "num_et_steps", int(num_et_steps))
         object.__setattr__(self, "num_et_steps_eval", int(num_et_steps_eval))
         object.__setattr__(self, "hn_activation", str(hn_activation))
+        object.__setattr__(self, "stop_grad_intermediate", bool(stop_grad_intermediate))
 
     def setup(self) -> None:
         act_dim = int(self.num_actions)
@@ -120,6 +123,7 @@ class MAMETEncoderPolicyNet(CategoricalMixin, Model):
             num_memories=self.num_memories,
             num_steps=self.num_et_steps,
             hn_activation=self.hn_activation,
+            stop_grad_intermediate=self.stop_grad_intermediate,
         )
 
         self._head = _Head(n_embd=self.n_embd, action_dim=act_dim)
