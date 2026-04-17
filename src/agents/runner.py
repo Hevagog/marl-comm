@@ -602,6 +602,32 @@ class BaseRunner(ABC):
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_flatland_figures(data, output_dir=output_dir, prefix=exp_name)
+        elif env_id == "continuous_coord":
+            from utils.continuous_coord_eval_analysis import ContinuousCoordEvalCollector
+            from utils.continuous_coord_eval_visualizer import save_all_cc_figures
+
+            cfg_env = env_cfg
+            deadline_min = cfg_env.get("target_deadline_min", 30)
+            deadline_max = cfg_env.get("target_deadline_max", 80)
+            deadline_avg = (deadline_min + deadline_max) / 2.0
+
+            collector = ContinuousCoordEvalCollector(
+                num_agents=cfg_env.get("num_agents", 4),
+                max_targets=cfg_env.get("max_targets", 3),
+                max_cycles=cfg_env.get("max_cycles", 200),
+                capture_reward=cfg_env.get("reward_capture", 10.0),
+                collision_radius=cfg_env.get("collision_radius", 0.03),
+                deadline_avg=deadline_avg,
+                type_dim=cfg_env.get("num_agent_types", 1)
+                if cfg_env.get("num_agent_types", 1) > 1
+                else 0,
+            )
+            data = collector.collect(
+                env=self._env, agent=self._agent, n_episodes=n_episodes
+            )
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            save_all_cc_figures(data, output_dir=output_dir, prefix=exp_name)
+
         elif env_id in ("warehouse", "warehouse-jax"):
             if self._cfg.get("experiment", {}).get("agent_type") == "magic":
                 from utils import (
