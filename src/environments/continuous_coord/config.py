@@ -70,6 +70,23 @@ class ContinuousCoordConfig:
     penalty_collision: float = -0.5
     """Penalty when two agents are within collision_radius."""
 
+    # --- typed-agent mode (num_agent_types > 1 activates) ---
+    num_agent_types: int = 1
+    """Number of distinct agent types. 1 = homogeneous (disables all type logic)."""
+
+    agent_types: list[int] | None = None
+    """Per-agent type list of length num_agents. None = round-robin (agent_i → i % num_agent_types).
+    Values must be in [0, num_agent_types). Design k_min/k_max so targets remain capturable
+    given per-type agent counts."""
+
+    penalty_wrong_type: float = -0.5
+    """Per-step penalty for an agent whose type is NOT required by the target, while inside
+    the capture zone. Only active when num_agent_types > 1."""
+
+    penalty_wrong_composition: float = -1.0
+    """Penalty applied to all agents in the capture zone when total count reaches k_req but
+    the per-type composition requirement is unsatisfied. Only active when num_agent_types > 1."""
+
     # --- rendering ---
     cell_size: int = 600
     """Pixel width/height of the rendered window."""

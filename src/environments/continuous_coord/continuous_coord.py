@@ -5,13 +5,24 @@ dynamically and each requires k-of-n agents to be simultaneously within
 a capture radius.  Agents receive rewards for capturing targets, bonuses
 for synchronized arrivals, and penalties for expired deadlines.
 
+Typed-agent mode (num_agent_types > 1)
+---------------------------------------
+Each agent is assigned a type id in [0, num_agent_types).  Each spawned
+target stores a per-type required agent count.  Two additional penalties:
+  * penalty_wrong_type       — per step, per agent of an unrequired type
+                               inside the capture zone.
+  * penalty_wrong_composition — all agents in zone when total count reaches
+                               k_req but per-type composition is wrong.
+
+Observation extensions (typed mode only):
+  own:      +num_agent_types  (own type one-hot)
+  teammate: +num_agent_types  (teammate type one-hot per slot)
+  target:   +num_agent_types  (normalised required count per type per slot)
+
 Performance
 -----------
 Optimised for maximum throughput on small agent counts (n=4–16).
-All per-step allocations are eliminated; intermediate buffers are
-pre-allocated in __init__ and reused via in-place updates.
-NumPy function calls are minimised — the inner loop avoids
-broadcasting for tiny arrays and uses direct element access.
+All per-step allocations eliminated; buffers pre-allocated in __init__.
 
 PettingZoo parallel API
 -----------------------
@@ -33,18 +44,17 @@ from .config import ContinuousCoordConfig
 
 _NUM_ACTIONS = 9
 
-# Precomputed unit direction vectors for the 8 movement actions + stay.
 _DIRS = np.array(
     [
-        [0.0, 1.0],  # 0: up
+        [0.0, 1.0],   # 0: up
         [0.0, -1.0],  # 1: down
         [-1.0, 0.0],  # 2: left
-        [1.0, 0.0],  # 3: right
+        [1.0, 0.0],   # 3: right
         [-1.0, 1.0],  # 4: up-left
-        [1.0, 1.0],  # 5: up-right
-        [-1.0, -1.0],  # 6: down-left
+        [1.0, 1.0],   # 5: up-right
+        [-1.0, -1.0], # 6: down-left
         [1.0, -1.0],  # 7: down-right
-        [0.0, 0.0],  # 8: stay
+        [0.0, 0.0],   # 8: stay
     ],
     dtype=np.float32,
 )
@@ -52,7 +62,6 @@ _norms = np.linalg.norm(_DIRS, axis=1, keepdims=True)
 _norms[_norms == 0] = 1.0
 _DIRS = _DIRS / _norms
 
-# Flatten to (9, 2) float tuples for fast Python-level access.
 _DIR_X = _DIRS[:, 0].tolist()
 _DIR_Y = _DIRS[:, 1].tolist()
 
@@ -64,19 +73,12 @@ _TPARENT = 5
 _TALIVE = 6
 _TARRIVAL_MIN = 7
 _TARRIVAL_MAX = 8
-_TCOLS = 9
+_TTYPE_REQ = 9    # base column; cols 9..9+n_types-1 store per-type requirements
+_TCOLS_BASE = 9   # target array columns when not typed
 
 
 class ContinuousCoordEnv:
-    """PettingZoo parallel-API Continuous Coordination environment.
-
-    Parameters
-    ----------
-    config : ContinuousCoordConfig
-        Environment configuration.
-    render_mode : str or None
-        ``"human"``, ``"rgb_array"``, or ``None`` (headless).
-    """
+    """PettingZoo parallel-API Continuous Coordination environment."""
 
     metadata = {
         "render_modes": ["human", "rgb_array"],
@@ -96,7 +98,6 @@ class ContinuousCoordEnv:
         n = config.num_agents
         mt = config.max_targets
 
-        # --- Cache config as plain Python scalars for hot-path access ---
         self._n = n
         self._mt = mt
         self._max_cycles = config.max_cycles
@@ -118,20 +119,74 @@ class ContinuousCoordEnv:
         )
         self._id_norm = max(n - 1, 1)
 
+        # --- Typed-agent setup ---
+        n_types = max(1, config.num_agent_types)
+        self._n_types = n_types
+        self._typed = n_types > 1
+
+        if self._typed:
+            if config.agent_types is not None:
+                if len(config.agent_types) != n:
+                    raise ValueError(
+                        f"agent_types length {len(config.agent_types)} != num_agents {n}"
+                    )
+                raw = list(config.agent_types)
+                for idx, t in enumerate(raw):
+                    if t < 0 or t >= n_types:
+                        raise ValueError(
+                            f"agent_types[{idx}]={t} out of range [0, {n_types})"
+                        )
+            else:
+                raw = [i % n_types for i in range(n)]
+
+            self._agent_types_arr: list[int] = raw
+            self._agent_type_counts: list[int] = [raw.count(t) for t in range(n_types)]
+
+            # Pre-built (n × n_types) one-hot matrix — written vectorised in _build_obs
+            self._agent_type_matrix = np.zeros((n, n_types), dtype=np.float32)
+            for i, ti in enumerate(raw):
+                self._agent_type_matrix[i, ti] = 1.0
+
+            self._p_wrong_type = config.penalty_wrong_type
+            self._p_wrong_comp = config.penalty_wrong_composition
+
+            # Pre-allocated per-step buffers (avoid per-step allocation in hot loop)
+            self._count_by_type: list[int] = [0] * n_types
+            self._tgt_type_buf = np.zeros(n_types, dtype=np.float32)
+
+            # Multinomial weights proportional to type populations
+            tc = np.array(self._agent_type_counts, dtype=np.float64)
+            self._type_sample_weights = tc / tc.sum()
+        else:
+            self._agent_types_arr = [0] * n
+            self._agent_type_counts = [n]
+            self._agent_type_matrix = np.zeros((n, 1), dtype=np.float32)
+            self._p_wrong_type = 0.0
+            self._p_wrong_comp = 0.0
+            self._count_by_type = [0]
+            self._tgt_type_buf = np.zeros(1, dtype=np.float32)
+            self._type_sample_weights = np.array([1.0])
+
+        # --- Observation / state dimensions ---
+        type_dim = n_types if self._typed else 0
+        self._type_dim = type_dim
+        self._teammate_slot = 4 + type_dim
+        self._target_slot = 4 + type_dim
+        self._teammate_dim = (n - 1) * self._teammate_slot
+        self._target_dim = mt * self._target_slot
+        self._obs_dim = 6 + type_dim + self._teammate_dim + self._target_dim
+        self._state_dim = n * (4 + type_dim) + mt * (4 + type_dim)
+
+        # State layout offsets
+        self._st_agent_type_off = n * 4
+        self._st_target_off = n * 4 + n * type_dim
+        self._st_target_type_off = self._st_target_off + mt * 4
+
         self._agent_names = [f"agent_{i}" for i in range(n)]
         self._possible_agents = list(self._agent_names)
-
-        # --- observation / state dimensions ---
-        self._teammate_dim = (n - 1) * 4
-        self._target_dim = mt * 4
-        self._obs_dim = 6 + self._teammate_dim + self._target_dim
-        self._state_dim = n * 4 + mt * 4
-
-        # Precomputed teammate-slot mapping: for agent i, which other agents
-        # fill slots 0..(n-2)?  _tm_map[i] = list of agent indices != i.
         self._tm_map = [[j for j in range(n) if j != i] for i in range(n)]
 
-        # --- spaces ---
+        # --- Spaces ---
         self._action_spaces = {
             a: spaces.Discrete(_NUM_ACTIONS) for a in self._possible_agents
         }
@@ -143,23 +198,21 @@ class ContinuousCoordEnv:
             low=-1.0, high=1.0, shape=(self._state_dim,), dtype=np.float32
         )
 
-        # --- internal state: flat Python lists for zero-overhead access ---
-        self._px: list[float] = [0.0] * n  # x-positions
-        self._py: list[float] = [0.0] * n  # y-positions
-        self._vx: list[float] = [0.0] * n  # x-velocities
-        self._vy: list[float] = [0.0] * n  # y-velocities
+        # --- Internal state ---
+        self._px: list[float] = [0.0] * n
+        self._py: list[float] = [0.0] * n
+        self._vx: list[float] = [0.0] * n
+        self._vy: list[float] = [0.0] * n
 
-        # numpy arrays for target data (accessed less frequently)
-        self._targets = np.zeros((mt, _TCOLS), dtype=np.float32)
+        self._tcols = _TCOLS_BASE + (n_types if self._typed else 0)
+        self._targets = np.zeros((mt, self._tcols), dtype=np.float32)
         self._arrival_steps = np.full((mt, n), -1, dtype=np.int32)
 
-        # --- pre-allocated per-step buffers ---
         self._rewards: list[float] = [0.0] * n
         self._all_obs = np.zeros((n, self._obs_dim), dtype=np.float32)
         self._prev_dists: list[float] = [0.0] * n
         self._state_buf = np.zeros(self._state_dim, dtype=np.float32)
 
-        # Pre-allocated agent-ID row for observations
         self._agent_ids = np.arange(n, dtype=np.float32) / self._id_norm
 
         self._agents: list[str] = list(self._possible_agents)
@@ -168,6 +221,8 @@ class ContinuousCoordEnv:
 
         self._renderer = None
         self._clock = None
+
+    # ---- Properties ----
 
     @property
     def possible_agents(self) -> list[str]:
@@ -209,21 +264,37 @@ class ContinuousCoordEnv:
         s = self._state_buf
         s[:] = 0.0
         px, py, vx, vy = self._px, self._py, self._vx, self._vy
+
         for i in range(n):
             s[i * 2] = px[i]
             s[i * 2 + 1] = py[i]
             s[n * 2 + i * 2] = vx[i]
             s[n * 2 + i * 2 + 1] = vy[i]
-        offset = n * 4
+
+        if self._typed:
+            at_off = self._st_agent_type_off
+            s[at_off : at_off + n * self._n_types] = self._agent_type_matrix.ravel()
+
         targets = self._targets
         da = self._deadline_avg
+        tgt_off = self._st_target_off
         for t in range(self._mt):
             if targets[t, _TALIVE] > 0.5:
-                base = offset + t * 4
+                base = tgt_off + t * 4
                 s[base] = targets[t, _TX]
                 s[base + 1] = targets[t, _TY]
                 s[base + 2] = targets[t, _TK] / n
                 s[base + 3] = targets[t, _TDEADLINE] / da
+
+        if self._typed:
+            ttr_off = self._st_target_type_off
+            n_types = self._n_types
+            for t in range(self._mt):
+                if targets[t, _TALIVE] > 0.5:
+                    base = ttr_off + t * n_types
+                    for tp in range(n_types):
+                        s[base + tp] = targets[t, _TTYPE_REQ + tp] / n
+
         return s
 
     def reset(
@@ -287,7 +358,6 @@ class ContinuousCoordEnv:
             vy_l[i] = new_vy
             nx = px[i] + new_vx * dt
             ny = py[i] + new_vy * dt
-            # clip [0, 1]
             if nx < 0.0:
                 nx = 0.0
             elif nx > 1.0:
@@ -317,6 +387,7 @@ class ContinuousCoordEnv:
         p_deadline = self._p_deadline
         r_capture = self._r_capture
         r_sync = self._r_sync
+        typed = self._typed
 
         for t in range(mt):
             if targets[t, _TALIVE] < 0.5:
@@ -324,10 +395,8 @@ class ContinuousCoordEnv:
             if targets[t, _TACTIVE] < 0.5:
                 continue
 
-            # 3a. Decrement deadline
             targets[t, _TDEADLINE] -= 1.0
 
-            # 3b. Expired?
             if targets[t, _TDEADLINE] <= 0.0:
                 pen_share = p_deadline / n
                 for _i in range(n):
@@ -342,16 +411,57 @@ class ContinuousCoordEnv:
             ty = targets[t, _TY]
             k_req = int(targets[t, _TK])
             count = 0
-            for i in range(n):
-                ddx = px[i] - tx
-                ddy = py[i] - ty
-                if ddx * ddx + ddy * ddy < cr2:
-                    count += 1
-                    if arrival[t, i] < 0:
-                        arrival[t, i] = step_count
+            do_capture = False
 
-            if count >= k_req:
-                # Captured — distribute reward
+            if typed:
+                ctb = self._count_by_type
+                n_types = self._n_types
+                for tp in range(n_types):
+                    ctb[tp] = 0
+                p_wt = self._p_wrong_type
+                types_arr = self._agent_types_arr
+
+                for i in range(n):
+                    ddx = px[i] - tx
+                    ddy = py[i] - ty
+                    if ddx * ddx + ddy * ddy < cr2:
+                        count += 1
+                        ti = types_arr[i]
+                        ctb[ti] += 1
+                        if arrival[t, i] < 0:
+                            arrival[t, i] = step_count
+                        # Per-step wrong-type penalty: type not required by this target
+                        if targets[t, _TTYPE_REQ + ti] < 0.5:
+                            rewards[i] += p_wt
+
+                # Composition check: every type requirement must be met
+                comp_ok = True
+                for tp in range(n_types):
+                    if ctb[tp] < int(targets[t, _TTYPE_REQ + tp]):
+                        comp_ok = False
+                        break
+
+                if comp_ok and count >= k_req:
+                    do_capture = True
+                elif count >= k_req:
+                    # Enough total agents but wrong type composition
+                    p_wc = self._p_wrong_comp
+                    for i in range(n):
+                        ddx = px[i] - tx
+                        ddy = py[i] - ty
+                        if ddx * ddx + ddy * ddy < cr2:
+                            rewards[i] += p_wc
+            else:
+                for i in range(n):
+                    ddx = px[i] - tx
+                    ddy = py[i] - ty
+                    if ddx * ddx + ddy * ddy < cr2:
+                        count += 1
+                        if arrival[t, i] < 0:
+                            arrival[t, i] = step_count
+                do_capture = count >= k_req
+
+            if do_capture:
                 n_part = 0
                 a_min = step_count
                 a_max = 0
@@ -367,7 +477,6 @@ class ContinuousCoordEnv:
                             a_max = aval
                         rewards[i] += r_capture / count
 
-                # Synchrony bonus
                 spread = float(a_max - a_min)
                 bonus = r_sync * math.exp(-spread / max(k_req, 1)) / count
                 for i in range(n):
@@ -406,7 +515,6 @@ class ContinuousCoordEnv:
         # ---- 6. Episode termination ----
         done = step_count >= self._max_cycles
 
-        # --- Build output dicts ---
         reward_dict = {agents[i]: rewards[i] for i in range(n)}
         terminated = {a: False for a in agents}
         truncated = {a: done for a in agents}
@@ -449,20 +557,38 @@ class ContinuousCoordEnv:
             ]
             frame[y_min:y_max, x_min:x_max][mc] = color
 
-        agent_colors = [
-            (220, 50, 50),
-            (50, 50, 220),
-            (50, 180, 50),
-            (200, 150, 0),
-            (150, 50, 200),
-            (0, 180, 180),
-            (200, 100, 50),
-            (100, 100, 100),
+        # Typed mode: color by type (hue), dims slightly per agent within type
+        _TYPE_COLORS = [
+            (220, 50,  50),  # type 0: red
+            (50,  50, 220),  # type 1: blue
+            (50, 180,  50),  # type 2: green
+            (200, 150,  0),  # type 3: yellow
+            (150, 50, 200),  # type 4: purple
+            (0,  180, 180),  # type 5: cyan
+            (200, 100, 50),  # type 6: orange
+            (100, 100, 100), # type 7: grey
         ]
+
+        if self._typed:
+            # Build per-type agent lists for rank-based dimming
+            per_type: list[list[int]] = [[] for _ in range(self._n_types)]
+            for i in range(self._n):
+                per_type[self._agent_types_arr[i]].append(i)
+
+            def _agent_color(i: int) -> tuple[int, int, int]:
+                t = self._agent_types_arr[i]
+                base = _TYPE_COLORS[t % len(_TYPE_COLORS)]
+                rank = per_type[t].index(i)
+                f = max(0.55, 1.0 - 0.15 * rank)
+                return (int(base[0] * f), int(base[1] * f), int(base[2] * f))
+        else:
+            def _agent_color(i: int) -> tuple[int, int, int]:
+                return _TYPE_COLORS[i % len(_TYPE_COLORS)]
+
         r_agent = max(3, int(0.015 * size))
         for i in range(self._n):
             cx, cy = to_px(self._px[i], self._py[i])
-            color = agent_colors[i % len(agent_colors)]
+            color = _agent_color(i)
             yy, xx = np.ogrid[-r_agent : r_agent + 1, -r_agent : r_agent + 1]
             mask = xx * xx + yy * yy <= r_agent * r_agent
             y_min, y_max = max(0, cy - r_agent), min(size, cy + r_agent + 1)
@@ -485,7 +611,8 @@ class ContinuousCoordEnv:
                 surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
                 self._renderer.blit(surf, (0, 0))
                 pygame.display.flip()
-                self._clock.tick(self._cfg.fps)
+                if self._clock is not None:
+                    self._clock.tick(self._cfg.fps)
             except ImportError:
                 pass
             return None
@@ -503,7 +630,6 @@ class ContinuousCoordEnv:
             self._renderer = None
 
     def _recompute_prev_dists(self) -> None:
-        """Set _prev_dists from current positions/targets (for reset)."""
         n = self._n
         mt = self._mt
         targets = self._targets
@@ -522,7 +648,6 @@ class ContinuousCoordEnv:
             self._prev_dists[i] = min_d if min_d < 1e8 else 0.0
 
     def _build_obs(self) -> dict[str, np.ndarray]:
-        """Build per-agent observations.  Uses pre-allocated buffer."""
         n = self._n
         mt = self._mt
         vr2 = self._vr2
@@ -530,11 +655,14 @@ class ContinuousCoordEnv:
         vx_l, vy_l = self._vx, self._vy
         targets = self._targets
         da = self._deadline_avg
+        typed = self._typed
+        type_dim = self._type_dim
+        n_types = self._n_types
 
         all_obs = self._all_obs
         all_obs[:] = 0.0
 
-        # Own state
+        # Own pos/vel, normalised id, time remaining
         time_left = 1.0 - self._step_count / self._max_cycles
         for i in range(n):
             all_obs[i, 0] = px[i]
@@ -544,9 +672,15 @@ class ContinuousCoordEnv:
         all_obs[:, 4] = self._agent_ids
         all_obs[:, 5] = time_left
 
+        # Own type one-hot (vectorised write)
+        if typed:
+            all_obs[:, 6 : 6 + n_types] = self._agent_type_matrix
+
         # Teammates (relative, vision-gated)
-        offset = 6
+        obs_tm_off = 6 + type_dim
+        tm_slot = self._teammate_slot
         tm_map = self._tm_map
+        types_arr = self._agent_types_arr
         for i in range(n):
             pxi = px[i]
             pyi = py[i]
@@ -554,26 +688,37 @@ class ContinuousCoordEnv:
                 ddx = px[j] - pxi
                 ddy = py[j] - pyi
                 if ddx * ddx + ddy * ddy <= vr2:
-                    base = offset + s * 4
+                    base = obs_tm_off + s * tm_slot
                     all_obs[i, base] = ddx
                     all_obs[i, base + 1] = ddy
                     all_obs[i, base + 2] = vx_l[j] - vx_l[i]
                     all_obs[i, base + 3] = vy_l[j] - vy_l[i]
+                    if typed:
+                        # One-hot: set single position, rest already 0
+                        all_obs[i, base + 4 + types_arr[j]] = 1.0
 
-        # Targets (relative)
-        offset2 = 6 + self._teammate_dim
+        # Targets (relative position + type-requirement features)
+        obs_tgt_off = obs_tm_off + self._teammate_dim
+        tgt_slot = self._target_slot
+        tgt_type_buf = self._tgt_type_buf
         for t in range(mt):
             if targets[t, _TALIVE] > 0.5 and targets[t, _TACTIVE] > 0.5:
-                base = offset2 + t * 4
+                base = obs_tgt_off + t * tgt_slot
                 tx = targets[t, _TX]
                 ty = targets[t, _TY]
                 tk = targets[t, _TK] / n
                 tu = targets[t, _TDEADLINE] / da
+                if typed:
+                    # Pre-compute once; same for all agents
+                    for tp in range(n_types):
+                        tgt_type_buf[tp] = targets[t, _TTYPE_REQ + tp] / n
                 for i in range(n):
                     all_obs[i, base] = tx - px[i]
                     all_obs[i, base + 1] = ty - py[i]
                     all_obs[i, base + 2] = tk
                     all_obs[i, base + 3] = tu
+                    if typed:
+                        all_obs[i, base + 4 : base + 4 + n_types] = tgt_type_buf
 
         return {self._possible_agents[i]: all_obs[i] for i in range(n)}
 
@@ -590,17 +735,35 @@ class ContinuousCoordEnv:
             return False
 
         rng = self._rng
-        px = float(rng.uniform(0.1, 0.9))
-        py = float(rng.uniform(0.1, 0.9))
-        k = int(rng.integers(cfg.target_k_min, cfg.target_k_max + 1))
-        k = min(k, self._n)
-        deadline = int(
-            rng.integers(cfg.target_deadline_min, cfg.target_deadline_max + 1)
-        )
+        tx = float(rng.uniform(0.1, 0.9))
+        ty = float(rng.uniform(0.1, 0.9))
+        deadline = int(rng.integers(cfg.target_deadline_min, cfg.target_deadline_max + 1))
 
-        targets[slot, _TX] = px
-        targets[slot, _TY] = py
-        targets[slot, _TK] = float(k)
+        if self._typed:
+            k = int(rng.integers(cfg.target_k_min, cfg.target_k_max + 1))
+            k = min(k, self._n)
+            # Distribute k across types; weights proportional to type populations
+            type_reqs = rng.multinomial(k, self._type_sample_weights).tolist()
+            # Clamp each type requirement to available agent count
+            actual_k = 0
+            for tp in range(self._n_types):
+                type_reqs[tp] = min(type_reqs[tp], self._agent_type_counts[tp])
+                actual_k += type_reqs[tp]
+            # Ensure at least one agent is required
+            if actual_k == 0:
+                dominant = max(range(self._n_types), key=lambda t: self._agent_type_counts[t])
+                type_reqs[dominant] = 1
+                actual_k = 1
+            targets[slot, _TK] = float(actual_k)
+            for tp in range(self._n_types):
+                targets[slot, _TTYPE_REQ + tp] = float(type_reqs[tp])
+        else:
+            k = int(rng.integers(cfg.target_k_min, cfg.target_k_max + 1))
+            k = min(k, self._n)
+            targets[slot, _TK] = float(k)
+
+        targets[slot, _TX] = tx
+        targets[slot, _TY] = ty
         targets[slot, _TDEADLINE] = float(deadline)
         targets[slot, _TALIVE] = 1.0
         targets[slot, _TARRIVAL_MIN] = 0.0
