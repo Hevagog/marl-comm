@@ -513,10 +513,17 @@ def main() -> None:
         flush=True,
     )
 
+    def _checkpoint_callback(study: optuna.Study, trial: optuna.Trial) -> None:
+        try:
+            _save_results(study, output_path)
+        except Exception:
+            pass
+
     study.optimize(
         objective,
         n_trials=args.n_trials,
         catch=(Exception,),
+        callbacks=[_checkpoint_callback],
     )
 
     print("\n=== Best trial ===")
