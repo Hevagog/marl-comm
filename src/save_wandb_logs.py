@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 import wandb
 import pandas as pd
 
@@ -44,6 +45,7 @@ def download_metrics(
     entity: str | None = None,
     run_name_filter: str | None = None,
     samples: int = 100_000,
+    config_path: str | None = None,
 ) -> None:
     api = wandb.Api()
 
@@ -64,6 +66,14 @@ def download_metrics(
 
     print(f"Found {len(matched)} run(s). Downloading …\n")
 
+    exp_name = run_name_filter or project
+    exp_dir = os.path.join(OUTPUT_DIR, exp_name.replace("/", "_"))
+    os.makedirs(exp_dir, exist_ok=True)
+
+    if config_path:
+        shutil.copy2(config_path, os.path.join(exp_dir, os.path.basename(config_path)))
+        print(f"Config copied → {exp_dir}/\n")
+
     all_frames = []
 
     for run in matched:
@@ -75,9 +85,8 @@ def download_metrics(
             print("    ↳ No metric history — skipping.")
             continue
 
-        # Per-run CSV
         safe_name = run.name.replace("/", "_")
-        per_run_path = os.path.join(OUTPUT_DIR, f"{safe_name}__{run.id}.csv")
+        per_run_path = os.path.join(exp_dir, f"{safe_name}__{run.id}.csv")
         df.to_csv(per_run_path, index=False)
         print(f"    ↳ Saved {len(df):,} rows → {per_run_path}")
 
@@ -86,7 +95,7 @@ def download_metrics(
     # Combined CSV (all matching runs together)
     if len(all_frames) > 1:
         combined = pd.concat(all_frames, ignore_index=True)
-        combined_path = os.path.join(OUTPUT_DIR, f"{project}_all_runs.csv")
+        combined_path = os.path.join(exp_dir, f"{project}_all_runs.csv")
         combined.to_csv(combined_path, index=False)
         print(f"\nCombined CSV ({len(combined):,} rows total) → {combined_path}")
     elif all_frames:
@@ -110,4 +119,5 @@ if __name__ == "__main__":
     download_metrics(
         project=project,
         run_name_filter=nm,
+        config_path=args.config,
     )

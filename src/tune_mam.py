@@ -19,7 +19,7 @@ Usage
   # continuous_coord (MAM enc-only)
   python src/tune_mam.py --env continuous_coord \\
       --n-trials 40 --trial-timesteps 500000
-
+    
   # resume / shared storage
   python src/tune_mam.py --env warehouse \\
       --storage sqlite:///tune_mam.db --study-name mam_warehouse
@@ -309,28 +309,27 @@ def _get_runner_class(agent_type: str):
 
 
 def _eval_mean_return(runner, n_episodes: int = 5, max_steps: int = 500) -> float:
-    """Run n_episodes with the trained agent; return mean episode return."""
+    """Return mean per-agent episode return across n_episodes pseudo-episodes.
+
+    Uses the vectorised training env directly: each call to env.step() advances
+    all num_envs environments simultaneously and auto-resets them on termination.
+    Episode boundaries are therefore approximated by fixed-length windows of
+    max_steps steps; rewards are averaged across envs (via jnp.mean) and agents.
+    """
     agent = runner._agent
     env = runner._env
     agent.set_running_mode("eval")
 
-    returns: list[float] = []
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
-        ep_return = 0.0
-        for step in range(max_steps):
-            actions, _, _ = agent.act(obs, timestep=step, timesteps=max_steps)
-            obs, rewards, terminated, truncated, _ = env.step(actions)
-            n_agents = max(len(rewards), 1)
-            ep_return += sum(rewards.values()) / n_agents
-            done = all(
-                terminated.get(a, False) or truncated.get(a, False) for a in terminated
-            )
-            if done:
-                break
-        returns.append(ep_return)
+    total_steps = n_episodes * max_steps
+    obs, _ = env.reset()
+    ep_return = 0.0
+    for step in range(total_steps):
+        actions, _, _ = agent.act(obs, timestep=step, timesteps=total_steps)
+        obs, rewards, _, _, _ = env.step(actions)
+        n_agents = max(len(rewards), 1)
+        ep_return += sum(float(jnp.mean(r)) for r in rewards.values()) / n_agents
 
-    return float(sum(returns) / len(returns))
+    return ep_return / total_steps
 
 
 # ---------------------------------------------------------------------------
@@ -516,8 +515,8 @@ def main() -> None:
     def _checkpoint_callback(study: optuna.Study, trial: optuna.Trial) -> None:
         try:
             _save_results(study, output_path)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Failed to save checkpoint after trial {trial.number}: {e}")
 
     study.optimize(
         objective,
@@ -526,8 +525,13 @@ def main() -> None:
         callbacks=[_checkpoint_callback],
     )
 
+    try:
+        best = study.best_trial
+    except ValueError:
+        print("\nNo completed trials — all were pruned.")
+        return
+
     print("\n=== Best trial ===")
-    best = study.best_trial
     print(f"  value:  {best.value:.4f}")
     print(f"  params: {json.dumps(best.params, indent=4)}")
 
