@@ -10,9 +10,6 @@ import numpy as np
 from skrl import config
 from skrl.multi_agents.jax.base import MultiAgent
 from skrl.multi_agents.jax.mappo import MAPPO
-from skrl.multi_agents.jax.mappo.mappo import (
-    _update_value,
-)
 
 from agents.mappo.adamw import AdamW
 
@@ -60,9 +57,7 @@ def _update_value_huber(
         return jnp.where(use_huber, huber, mse)
 
     def _value_loss(params):
-        predicted_values, _, _ = value_act(
-            {"states": sampled_states}, "value", params
-        )
+        predicted_values, _, _ = value_act({"states": sampled_states}, "value", params)
         if clip_predicted_values:
             # Value-function trust region: clip the *change* in prediction
             # relative to the rollout-time value estimate.  Identical in
@@ -242,8 +237,10 @@ def _update_policy_fixed(
         ratio_std = ratio.std()
         ratio_max_abs_dev = jnp.abs(ratio - 1.0).max()
         ratio_clipped_frac = (
-            (ratio < 1.0 - ratio_clip) | (ratio > 1.0 + ratio_clip)
-        ).mean().astype(jnp.float32)
+            ((ratio < 1.0 - ratio_clip) | (ratio > 1.0 + ratio_clip))
+            .mean()
+            .astype(jnp.float32)
+        )
         surrogate_raw_mean = surrogate.mean()
 
         policy_loss = -jnp.minimum(surrogate, surrogate_clipped).mean()
@@ -268,10 +265,7 @@ def _update_policy_fixed(
                     n, dtype=jnp.float32
                 )
                 num_off_diag = jnp.float32(n * n - n)
-                num_matrices = jnp.float32(adj.shape[0] * adj.shape[1])
-                density = jnp.sum(adj * off_diag[None, None, :, :]) / (
-                    num_matrices * num_off_diag
-                )
+                density = jnp.sum(adj * off_diag) / num_off_diag
                 eps = jnp.float32(1e-6)
                 h = -(
                     density * jnp.log(density + eps)
@@ -310,9 +304,7 @@ def _update_policy_fixed(
     )
 
     leaves = jax.tree_util.tree_leaves(grad)
-    grad_global_norm = jnp.sqrt(
-        sum(jnp.vdot(leaf, leaf).real for leaf in leaves)
-    )
+    grad_global_norm = jnp.sqrt(sum(jnp.vdot(leaf, leaf).real for leaf in leaves))
 
     diag = {
         **diag,
@@ -435,14 +427,6 @@ class CategoricalMAPPO(MAPPO):
                     scale=False,
                 )
                 # Point all per-agent optimizer slots to the shared instances.
-                # BUG-C-001 fix: do NOT register optimizers in checkpoint_modules.
-                # skrl's write_checkpoint calls flax.serialization.to_bytes() on
-                # every module in checkpoint_modules, which internally uses msgpack
-                # with strict_types=True.  The optax state inside AdamW contains
-                # Python tuples (ScaleByAdamState, EmptyState) that msgpack cannot
-                # serialise, causing a TypeError at the first checkpoint save.
-                # The load() override ignores optimizer state anyway, so registering
-                # optimizers here provides no benefit.
                 for uid in self.possible_agents:
                     self.policy_optimizer[uid] = shared_policy_opt
                     self.value_optimizer[uid] = shared_value_opt
@@ -467,15 +451,7 @@ class CategoricalMAPPO(MAPPO):
                     )
                     self.policy_optimizer[uid] = per_agent_policy_opt
                     self.value_optimizer[uid] = shared_value_opt
-                    # BUG-C-001 fix: optimizers not registered in checkpoint_modules
-                    # (see shared-policy branch above for full explanation).
 
-        # BUG-C-001 fix (cont): MAPPO.__init__ (called via super().__init__() above)
-        # already registered skrl Adam optimizers in checkpoint_modules BEFORE we
-        # replaced them with AdamW instances. Those Adam optimizers contain Optax
-        # state tuples (ScaleByAdamState, EmptyState) that msgpack cannot serialise,
-        # causing `TypeError: can not serialize 'tuple' object` at the first
-        # checkpoint save. Remove them here so write_checkpoint never sees them.
         for uid in self.possible_agents:
             self.checkpoint_modules[uid].pop("policy_optimizer", None)
             self.checkpoint_modules[uid].pop("value_optimizer", None)
