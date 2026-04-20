@@ -78,6 +78,34 @@ def compute_rewards(
     # --- collision penalty ---
     rewards += collision_mask.astype(np.float32) * config.penalty_collision
 
+    # --- rescue proximity shaping ---
+    # Provides intermediate gradient for the rescue navigation sub-task.
+    # Without this, agents must navigate 10-30 steps to a stranded teammate
+    # before receiving any signal — the rescue gradient is essentially zero.
+    # Reward = proximity_scale / (distance + 1) for each active agent near a
+    # stranded teammate; capped so it never exceeds a single delivery reward.
+    if config.reward_rescue_proximity > 0.0:
+        from .agent_utils import _stranded_mask
+
+        stranded = _stranded_mask(state)
+        stranded_positions = [
+            state.agent.positions[j]
+            for j in range(config.max_agents)
+            if stranded[j]
+        ]
+        if stranded_positions:
+            scale = config.reward_rescue_proximity
+            for i in range(config.max_agents):
+                if not state.agent.active[i]:
+                    continue
+                # Skip agents already performing a rescue (they get the big reward)
+                if state.agent.rescue_target[i] >= 0:
+                    continue
+                pi = state.agent.positions[i]
+                for sp in stranded_positions:
+                    dist = abs(int(sp[0]) - int(pi[0])) + abs(int(sp[1]) - int(pi[1]))
+                    rewards[i] += scale / (dist + 1)
+
     # --- zero out inactive ---
     rewards *= active_f
 

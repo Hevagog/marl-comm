@@ -53,6 +53,10 @@ class WarehouseConfig:
     reward_delivery: float = 10.0
     reward_rescue_repair: float = 12.0
     reward_rescue_charge: float = 12.0
+    # Small per-step reward for approaching a stranded teammate (0 = disabled).
+    # Provides intermediate gradient for rescue navigation; without it, agents
+    # must chain 10-30 steps blindly before receiving any rescue signal.
+    reward_rescue_proximity: float = 0.0
     penalty_congestion: float = -0.05
     penalty_collision: float = -1.0
     step_penalty: float = -0.01
@@ -61,6 +65,16 @@ class WarehouseConfig:
     max_cycles: int = 500
 
     comm_range: int | None = None  # max grid-cell distance for observing others
+
+    # ---- No-communication mode ----
+    # When True, agents observe only local vision (no teammate internal state).
+    # Visibility is gated by vision_range (not comm_range).
+    # Within range: position + is_carrying + is_stranded visible (physically observable).
+    # Not visible: battery, active flag, resource_phase, task state (all require radio).
+    # Obs-dim is unchanged — same feature slots, zeroed where info requires comms.
+    # This creates a genuine information barrier: MAPPO acts blind to teammate state;
+    # CommFormer/MAT/MAM share local embeddings via model-level attention.
+    no_comm: bool = False
 
     enable_task_deadlines: bool = False
     task_arrival_rate: float = 0.5  # Poisson λ — expected new tasks per step

@@ -20,6 +20,13 @@ class ContinuousCoordConfig:
     vision_range: float = 0.4
     """Maximum distance at which an agent can observe teammates."""
 
+    target_vision_range: float = 1.5
+    """Maximum distance at which an agent can observe targets.
+    Default 1.5 (> sqrt(2) diagonal) = always visible, preserving current behaviour.
+    Set to a small value (e.g. 0.2) to create a private-information communication gap:
+    each agent only sees nearby targets, forcing communication architectures to share
+    target locations across agents (MAPPO cannot do this — info not in its obs)."""
+
     collision_radius: float = 0.03
     """Distance below which two agents receive a collision penalty."""
 

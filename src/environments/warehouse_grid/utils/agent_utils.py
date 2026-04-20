@@ -146,31 +146,50 @@ def get_agent_observation(
     stranded = _stranded_mask(state)
 
     # ------ other agents (5 or 6 features each) ------
+    # no_comm=True: gate by vision_range, expose only physically-observable state.
+    #   Visible: position (dx,dy), is_carrying (shelf on robot is visible), is_stranded
+    #   (stopped robot is physically detectable).  Battery and active flag require radio.
+    #   Obs-dim unchanged — same slots, zeroed where radio comm is required.
+    # no_comm=False (default): gate by comm_range; full internal state shared via radio.
     _n_other = 6 if config.enable_battery else 5
+    _no_comm = config.no_comm
+    _gate_dist = config.vision_range if _no_comm else config.comm_range
     for i in range(config.max_agents):
         if i == agent_idx:
             continue
         if state.agent.active[i] or stranded[i]:
             other_pos = state.agent.positions[i]
-            #  comm_range gating
-            if config.comm_range is not None:
-                dist = abs(int(other_pos[0]) - row) + abs(int(other_pos[1]) - col)
-                if dist > config.comm_range:
-                    features.extend([0.0] * _n_other)
-                    continue
-            features.extend(
-                [
-                    (other_pos[0] - row) / H,
-                    (other_pos[1] - col) / W,
-                    float(state.agent.carrying[i] > 0),
-                    float(state.agent.active[i]),
-                    float(stranded[i]),
-                ]
-            )
-            if config.enable_battery:
-                features.append(
-                    state.agent.battery[i] / max(config.battery_capacity, 1)
+            dist = abs(int(other_pos[0]) - row) + abs(int(other_pos[1]) - col)
+            if _gate_dist is not None and dist > _gate_dist:
+                features.extend([0.0] * _n_other)
+                continue
+            if _no_comm:
+                # Physical vision only: position + visible state, no radio info
+                features.extend(
+                    [
+                        (other_pos[0] - row) / H,
+                        (other_pos[1] - col) / W,
+                        float(state.agent.carrying[i] > 0),  # shelf visible on robot
+                        0.0,   # active flag requires radio — zero in no-comm
+                        float(stranded[i]),  # stopped robot is physically detectable
+                    ]
                 )
+                if config.enable_battery:
+                    features.append(0.0)  # battery requires radio — zero in no-comm
+            else:
+                features.extend(
+                    [
+                        (other_pos[0] - row) / H,
+                        (other_pos[1] - col) / W,
+                        float(state.agent.carrying[i] > 0),
+                        float(state.agent.active[i]),
+                        float(stranded[i]),
+                    ]
+                )
+                if config.enable_battery:
+                    features.append(
+                        state.agent.battery[i] / max(config.battery_capacity, 1)
+                    )
         else:
             features.extend([0.0] * _n_other)
 
@@ -210,6 +229,10 @@ def get_agent_observation(
 
     # ------ assemble & apply noise ------
     obs = np.array(features, dtype=np.float32)
+
+    # In no_comm mode obs is purely local vision — no radio channel to corrupt.
+    if config.no_comm:
+        return obs
 
     # Compute effective noise probability
     noise_prob = config.comm_noise_prob

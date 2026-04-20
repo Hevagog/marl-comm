@@ -35,7 +35,7 @@ UP(0), DOWN(1), LEFT(2), RIGHT(3)
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Tuple
+from typing import Any, Literal
 from collections.abc import Mapping
 
 import gymnasium
@@ -191,7 +191,9 @@ class CoinGameEnv:
         infos: dict[str, dict] = {a: {} for a in self._agents}
         return obs, infos
 
-    def step(self, actions: Mapping[str, int | np.integer]) -> tuple[
+    def step(
+        self, actions: Mapping[str, int | np.integer]
+    ) -> tuple[
         dict[str, np.ndarray],  # observation
         dict[str, float],  # rewards
         dict[str, bool],  # terminated

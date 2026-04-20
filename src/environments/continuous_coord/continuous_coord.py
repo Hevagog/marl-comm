@@ -103,6 +103,7 @@ class ContinuousCoordEnv:
         self._max_cycles = config.max_cycles
         self._cr2 = config.capture_radius * config.capture_radius
         self._vr2 = config.vision_range * config.vision_range
+        self._tvr2 = config.target_vision_range * config.target_vision_range
         self._coll_r2 = config.collision_radius * config.collision_radius
         self._vel_damp = config.velocity_damping
         self._vel_gain = config.velocity_gain * config.max_speed
@@ -697,10 +698,13 @@ class ContinuousCoordEnv:
                         # One-hot: set single position, rest already 0
                         all_obs[i, base + 4 + types_arr[j]] = 1.0
 
-        # Targets (relative position + type-requirement features)
+        # Targets (relative position + type-requirement features, target-vision-gated)
+        # When target_vision_range < sqrt(2) each agent only sees nearby targets;
+        # this creates private information that communication architectures can share.
         obs_tgt_off = obs_tm_off + self._teammate_dim
         tgt_slot = self._target_slot
         tgt_type_buf = self._tgt_type_buf
+        tvr2 = self._tvr2
         for t in range(mt):
             if targets[t, _TALIVE] > 0.5 and targets[t, _TACTIVE] > 0.5:
                 base = obs_tgt_off + t * tgt_slot
@@ -709,16 +713,18 @@ class ContinuousCoordEnv:
                 tk = targets[t, _TK] / n
                 tu = targets[t, _TDEADLINE] / da
                 if typed:
-                    # Pre-compute once; same for all agents
                     for tp in range(n_types):
                         tgt_type_buf[tp] = targets[t, _TTYPE_REQ + tp] / n
                 for i in range(n):
-                    all_obs[i, base] = tx - px[i]
-                    all_obs[i, base + 1] = ty - py[i]
-                    all_obs[i, base + 2] = tk
-                    all_obs[i, base + 3] = tu
-                    if typed:
-                        all_obs[i, base + 4 : base + 4 + n_types] = tgt_type_buf
+                    ddx = tx - px[i]
+                    ddy = ty - py[i]
+                    if ddx * ddx + ddy * ddy <= tvr2:
+                        all_obs[i, base] = ddx
+                        all_obs[i, base + 1] = ddy
+                        all_obs[i, base + 2] = tk
+                        all_obs[i, base + 3] = tu
+                        if typed:
+                            all_obs[i, base + 4 : base + 4 + n_types] = tgt_type_buf
 
         return {self._possible_agents[i]: all_obs[i] for i in range(n)}
 
