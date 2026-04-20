@@ -2,15 +2,32 @@
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 
+# MAT on warehouse with no-communication observation (local vision only).
+#
+# no_comm=True in env section:
+#   - Other agents visible only within vision_range (not comm_range)
+#   - Visible: position (dx,dy), is_carrying (shelf on robot), is_stranded (stopped)
+#   - Hidden: battery, active flag (require radio to know)
+#   - No comm noise (local vision has no packet loss)
+#   - Obs dim stays 190 — same preprocessor size
+#
+# MAT compensates for the communication gap via full N×N encoder attention:
+#   Agent A's local embedding (carrying=1, stranded=0) flows via cross-attention
+#   to agent B's decoder even though B cannot directly observe A's battery level.
+#   The encoder learns to propagate physically-observable signals (is_carrying,
+#   is_stranded) into latent representations that inform other agents' policies.
+#
+# No CommGraph α → no STE bottleneck → cleaner gradient signal than CommFormer.
+# Expected to match or exceed CommFormer performance in the no_comm benchmark.
 CONFIG = {
     "experiment": {
-        "name":             "commformer_warehouse_v13",
-        "agent_type":       "commformer",
+        "name":             "mat_warehouse_nocomm_v1",
+        "agent_type":       "mat",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["commformer", "warehouse"],
+            "tags":    ["mat", "warehouse", "no_comm"],
         },
         "write_interval":      25_000,
         "checkpoint_interval": 200_000,
@@ -19,7 +36,7 @@ CONFIG = {
 
     "env": {
         "id":            "warehouse",
-        "num_envs":      8,    # NOTE: increase to 8–16 for production runs; paper uses 64
+        "num_envs":      8,
         "grid_height":   12,
         "grid_width":    16,
         "num_agents":    4,
@@ -29,13 +46,15 @@ CONFIG = {
         "num_treatment_stations": 2,
         "num_goal_locations": 2,
         "treatment_duration": 5,
-        "comm_noise_prob":        0.0,   # MAM handles via BiMamba encoder
-        "vision_range":           2,     # 5×5 patch
-        "max_cycles":             500,
-        "comm_range":             5,
+        "comm_noise_prob":    0.0,  # irrelevant when no_comm=True
+        "vision_range":       2,    # 5×5 local view — also the teammate gate in no_comm
+        "max_cycles":         500,
+        "comm_range":         5,    # used only when no_comm=False
+
+        # KEY: local-only observations
+        "no_comm":            True,
 
         "randomize_layout": True,
-
 
         "enable_task_deadlines":  True,
         "task_arrival_rate":      0.2,
@@ -50,10 +69,7 @@ CONFIG = {
         "agent_capacity_options": (1, 2, 1),
         "agent_fragility_options":(1.0, 0.5, 2.0),
 
-        "enable_interference_zones":    True,
-        "interference_base":            0.05,
-        "interference_treatment_boost": 0.15,
-        "interference_radius":          2,
+        "enable_interference_zones": False,  # no radio = no interference model
 
         "enable_battery":             True,
         "battery_capacity":           200,
@@ -65,15 +81,16 @@ CONFIG = {
         "reward_rescue_repair":       12.0,
         "reward_rescue_charge":       12.0,
 
-        "agent_failure_prob": 0.0002,
+        "reward_rescue_proximity":    0.2,
+        "agent_failure_prob": 0.001,
         "fault_profile": {
             "burst_attrition":     True,
-            "burst_prob":          0.0002,
+            "burst_prob":          0.001,
             "correlated_failure":  False,
             "correlation_radius":  1,
-            "load_dependent_comm": True,
-            "base_packet_loss":    0.02,
-            "congestion_factor":   0.05,
+            "load_dependent_comm": False,  # no comm = no load-dependent comm noise
+            "base_packet_loss":    0.0,
+            "congestion_factor":   0.0,
         },
     },
 
@@ -94,15 +111,9 @@ CONFIG = {
         "fps":             10,
     },
 
-    # ---- CommFormer-specific PPO parameters ----
-    "commformer": {
-        # v13: 256→1024 rollouts for 4× more data per update.
-        # Parallel decoder is 4× faster at rollout (no AR scan), so net
-        # compute per update is roughly unchanged.  4× larger buffer gives
-        # substantially stronger policy-gradient signal relative to entropy,
-        # breaking the entropy-dominance cycle observed in v12.
+    "mat": {
         "rollouts":        1024,
-        "learning_epochs": 3,
+        "learning_epochs": 5,
         "mini_batches":    4,
 
         "discount_factor": 0.99,
@@ -112,18 +123,13 @@ CONFIG = {
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
-        # v11: linear LR decay — match MAPPO to stabilise late-stage training.
-        # Decay begins at 20% of total steps (earlier than MAPPO's 30%) because
-        # CommFormer needs more aggressive stabilisation once the communication
-        # graph starts to crystallise.
         "linear_lr_decay":         True,
         "lr_decay_start_fraction": 0.2,
         "min_lr_fraction":         0.1,
 
-        # obs_dim = 7+8+(5*5*6)+(3*6)+3+1+3 = 190 (vision=2, max_agents=4)
+        # obs_dim = 190 unchanged (same slots, zeroed where internal state was)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
-        # state_dim = 12*16*6 + 4*8 = 1184; expanded with 4-agent one-hot = 1188
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
         "value_preprocessor":               RunningStandardScaler,
@@ -137,52 +143,25 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        # v13: further entropy reduction.
-        # v12 analysis: entropy still INCREASED (1.65→1.74) even at scale=0.02.
-        # Root cause: policy gradient near-zero on sparse rewards → entropy
-        # gradient dominates → policy driven toward uniform.
-        # v13 fix: 0.005 start (4× lower than v12) so even weak policy gradients
-        # dominate.  Parallel decoder also produces ratio=1.0 at update start,
-        # allowing all 3×4=12 gradient steps to execute, strengthening signal.
-        "entropy_loss_scale":       0.005,  # fallback if annealing is off
+        "entropy_loss_scale":       0.01,
         "entropy_annealing":        True,
-        "entropy_loss_scale_start": 0.005,
-        "entropy_loss_scale_end":   0.0005,
+        "entropy_loss_scale_start": 0.01,
+        "entropy_loss_scale_end":   0.001,
         "debug_entropy_stats":      False,
 
         "value_loss_scale":   1.0,
-
-        # v13: relax KL threshold — parallel decoder starts ratio=1.0 so early
-        # stopping is less likely to be triggered spuriously.  0.05 matches
-        # typical MAPPO KL thresholds and allows 2-3 full epochs to execute
-        # per rollout before the policy has drifted too far.
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
-
         "time_limit_bootstrap": True,
-
         "weight_decay":       1e-4,
 
-        # v11: communication topology regulariser (Bug-3 from memory).
-        # Pushes adjacency density toward 0.5 (balanced) via binary-entropy
-        # loss on off-diagonal elements.  Prevents α collapse to all-zero or
-        # all-one, which would make communication trivially sparse or dense.
-        "comm_reg_scale":     0.001,
-
-        # ---- CommFormer architecture hyperparameters ----
-        # Larger capacity for 4-agent heterogeneous warehouse task.
-        # sparsity=0.5 → k=2 for N=4: each agent attends to 2 others.
-        # v2: upsized from 128→256 hidden / 256→512 mlp after observing no learning
-        # in v1.  v11: keeping 256 — the architecture was correct, the training
-        # schedule was wrong (missing entropy annealing + LR decay).
         "hidden_dim":  256,
         "num_blocks":  2,
         "num_heads":   4,
         "head_dim":    64,
-        "mlp_dim":     256,
-        "sparsity":    0.5,
+        "mlp_dim":     512,
     },
 
     "policy": {

@@ -2,15 +2,38 @@
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 
+# MAT warehouse v1
+#
+# Architecture: Multi-Agent Transformer (Wen et al. 2022, NeurIPS).
+# Standard scaled dot-product self-attention over N agent observations —
+# no CommGraph, no α, no k-hot STE.  GTrXL init on Wo/mlp2 projections
+# (Parisotto et al. 2020) for stable early training.  Parallel decoder
+# with zero start tokens: ratio = 1.0 at every PPO update start.
+#
+# Hyperparameter rationale vs. CommFormer v13
+# -------------------------------------------
+# - rollouts 1024: same as CommFormer v13.  MAT has no α to stabilise so
+#   fewer rollouts than MAM (256) should suffice; 1024 balances data
+#   diversity vs. update frequency.
+# - learning_epochs 5 (vs. CF 3): MAT has 3.4× fewer params than CommFormer
+#   (no CommGraph, no EdgeEmbedding) so it can tolerate more gradient steps
+#   per rollout without ratio drift, because the network is less expressive
+#   and the ratio stays closer to 1.0.
+# - entropy_loss_scale_start 0.01: MAT attention is differentiable from
+#   step 0 (no discrete STE bottleneck), so it can extract gradient signal
+#   sooner and benefits from slightly higher initial exploration pressure.
+# - comm_reg_scale: absent (no α to regularise).
+# - hidden_dim 256, mlp_dim 512: increased FFN capacity vs. CommFormer
+#   (mlp_dim 256) to match the wider standard-transformer FFN ratio (2× d).
 CONFIG = {
     "experiment": {
-        "name":             "commformer_warehouse_v13",
-        "agent_type":       "commformer",
+        "name":             "mat_warehouse_v1",
+        "agent_type":       "mat",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["commformer", "warehouse"],
+            "tags":    ["mat", "warehouse"],
         },
         "write_interval":      25_000,
         "checkpoint_interval": 200_000,
@@ -19,7 +42,7 @@ CONFIG = {
 
     "env": {
         "id":            "warehouse",
-        "num_envs":      8,    # NOTE: increase to 8–16 for production runs; paper uses 64
+        "num_envs":      8,
         "grid_height":   12,
         "grid_width":    16,
         "num_agents":    4,
@@ -29,13 +52,12 @@ CONFIG = {
         "num_treatment_stations": 2,
         "num_goal_locations": 2,
         "treatment_duration": 5,
-        "comm_noise_prob":        0.0,   # MAM handles via BiMamba encoder
-        "vision_range":           2,     # 5×5 patch
+        "comm_noise_prob":        0.0,
+        "vision_range":           2,
         "max_cycles":             500,
         "comm_range":             5,
 
         "randomize_layout": True,
-
 
         "enable_task_deadlines":  True,
         "task_arrival_rate":      0.2,
@@ -94,15 +116,10 @@ CONFIG = {
         "fps":             10,
     },
 
-    # ---- CommFormer-specific PPO parameters ----
-    "commformer": {
-        # v13: 256→1024 rollouts for 4× more data per update.
-        # Parallel decoder is 4× faster at rollout (no AR scan), so net
-        # compute per update is roughly unchanged.  4× larger buffer gives
-        # substantially stronger policy-gradient signal relative to entropy,
-        # breaking the entropy-dominance cycle observed in v12.
+    # ---- MAT-specific PPO parameters ----
+    "mat": {
         "rollouts":        1024,
-        "learning_epochs": 3,
+        "learning_epochs": 5,
         "mini_batches":    4,
 
         "discount_factor": 0.99,
@@ -112,10 +129,6 @@ CONFIG = {
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
-        # v11: linear LR decay — match MAPPO to stabilise late-stage training.
-        # Decay begins at 20% of total steps (earlier than MAPPO's 30%) because
-        # CommFormer needs more aggressive stabilisation once the communication
-        # graph starts to crystallise.
         "linear_lr_decay":         True,
         "lr_decay_start_fraction": 0.2,
         "min_lr_fraction":         0.1,
@@ -123,7 +136,8 @@ CONFIG = {
         # obs_dim = 7+8+(5*5*6)+(3*6)+3+1+3 = 190 (vision=2, max_agents=4)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
-        # state_dim = 12*16*6 + 4*8 = 1184; expanded with 4-agent one-hot = 1188
+        # state_dim = 12*16*6 + 4*8 = 1184; +4 one-hot = 1188
+        # WH-B02 note: runtime _sync_preprocessor_sizes corrects to 1184 if needed.
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
         "value_preprocessor":               RunningStandardScaler,
@@ -137,25 +151,19 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        # v13: further entropy reduction.
-        # v12 analysis: entropy still INCREASED (1.65→1.74) even at scale=0.02.
-        # Root cause: policy gradient near-zero on sparse rewards → entropy
-        # gradient dominates → policy driven toward uniform.
-        # v13 fix: 0.005 start (4× lower than v12) so even weak policy gradients
-        # dominate.  Parallel decoder also produces ratio=1.0 at update start,
-        # allowing all 3×4=12 gradient steps to execute, strengthening signal.
-        "entropy_loss_scale":       0.005,  # fallback if annealing is off
+        # Slightly higher initial entropy than CommFormer v13 (0.005→0.01)
+        # because MAT has no discrete STE bottleneck and can extract gradient
+        # signal from step 0; the extra exploration helps shape attention.
+        "entropy_loss_scale":       0.01,
         "entropy_annealing":        True,
-        "entropy_loss_scale_start": 0.005,
-        "entropy_loss_scale_end":   0.0005,
+        "entropy_loss_scale_start": 0.01,
+        "entropy_loss_scale_end":   0.001,
         "debug_entropy_stats":      False,
 
         "value_loss_scale":   1.0,
 
-        # v13: relax KL threshold — parallel decoder starts ratio=1.0 so early
-        # stopping is less likely to be triggered spuriously.  0.05 matches
-        # typical MAPPO KL thresholds and allows 2-3 full epochs to execute
-        # per rollout before the policy has drifted too far.
+        # MAT parallel decoder gives ratio = 1.0 at update start, so 0.05
+        # matches MAPPO and allows 2-3 full epochs before ratio drifts.
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
 
@@ -165,24 +173,15 @@ CONFIG = {
 
         "weight_decay":       1e-4,
 
-        # v11: communication topology regulariser (Bug-3 from memory).
-        # Pushes adjacency density toward 0.5 (balanced) via binary-entropy
-        # loss on off-diagonal elements.  Prevents α collapse to all-zero or
-        # all-one, which would make communication trivially sparse or dense.
-        "comm_reg_scale":     0.001,
-
-        # ---- CommFormer architecture hyperparameters ----
-        # Larger capacity for 4-agent heterogeneous warehouse task.
-        # sparsity=0.5 → k=2 for N=4: each agent attends to 2 others.
-        # v2: upsized from 128→256 hidden / 256→512 mlp after observing no learning
-        # in v1.  v11: keeping 256 — the architecture was correct, the training
-        # schedule was wrong (missing entropy annealing + LR decay).
+        # ---- MAT architecture hyperparameters ----
+        # hidden_dim=256 matches CommFormer.  mlp_dim=512 is 2× hidden_dim,
+        # following standard Transformer FFN ratio (Vaswani et al. 2017 §3.3).
+        # sparsity absent: MAT has full N×N attention, no CommGraph.
         "hidden_dim":  256,
         "num_blocks":  2,
         "num_heads":   4,
         "head_dim":    64,
-        "mlp_dim":     256,
-        "sparsity":    0.5,
+        "mlp_dim":     512,
     },
 
     "policy": {
