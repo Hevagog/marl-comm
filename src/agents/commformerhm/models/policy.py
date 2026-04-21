@@ -167,12 +167,6 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
         x_emb = node_embed(x)  # (B, hidden_dim)
 
         comm_outputs: dict = {}
-        action_embed = nn.Embed(
-            num_embeddings=int(self.num_actions),
-            features=self.hidden_dim,
-            embedding_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
-            name="action_embed",
-        )
         action_fc = nn.Dense(
             self.hidden_dim,
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
@@ -193,7 +187,6 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
             groups = b // n
             x_grouped = x_emb.reshape(groups, n, self.hidden_dim)
             obs_grouped = x.reshape(groups, n, -1)
-            ar_key = inputs.get("ar_key", None)
 
             # --- Task Hopfield pooling (before comm graph) ---
             if self.use_task_hopfield:
@@ -206,37 +199,30 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
                 )
                 x_grouped = task_hopfield(obs_grouped, x_grouped)
 
-            # --- Decoder input (teacher forcing or zero start tokens) ---
-            taken_acts = inputs.get("taken_actions", None)
-            if taken_acts is not None:
-                act_idx = taken_acts.reshape(b).astype(jnp.int32)
-                act_emb = action_embed(act_idx)
-                act_emb_grouped = act_emb.reshape(groups, n, self.hidden_dim)
-                start_tok = jnp.zeros((groups, 1, self.hidden_dim))
-                dec_in = jnp.concatenate(
-                    [start_tok, act_emb_grouped[:, :-1, :]], axis=1
-                )
-            else:
-                # Init the embed layer for param creation
-                _dummy_idx = jnp.zeros(n, dtype=jnp.int32)
-                action_embed(_dummy_idx)
-
             # --- Communication graph ---
             if self.execution_mode == "local_only":
                 # No communication: identity adjacency (each agent attends to self only)
                 adj = jnp.eye(n)
             else:
-                # Full CTDE communication graph. Use stochastic Gumbel sampling
-                # only for teacher-forced PPO updates; rollout/eval stays
-                # deterministic per CommFormer Eq. 12.
+                # Full CTDE communication graph.
+                # Always use deterministic k-argmax (CommFormer Eq. 12):
+                # same adj at rollout and training ensures consistent log-probs.
+                # Alpha receives gradients via the straight-through estimator.
                 comm = CommGraph(
                     num_agents=n,
                     sparsity=self.sparsity,
                     name="comm_graph",
                 )
-                gumbel_rng = inputs.get("gumbel_rng", None)
-                graph_training = taken_acts is not None and gumbel_rng is not None
-                adj = comm(rng=gumbel_rng, training=graph_training)
+                # BUG-HM-001 fix: never inject gumbel_rng at training time.
+                # Rollout uses ar_key path with deterministic adj (training=False).
+                # Training must also use deterministic adj so that the recomputed
+                # log-probs match the stored rollout log-probs → ratio ≈ 1 → KL stable.
+                # Alpha still receives gradients via the STE in _k_hot.
+                adj = comm(rng=None, training=False)
+                # BUG-HM-003 fix: guarantee self-loops so that the decoder causal
+                # mask (agent-0 restricted to column 0 only) never produces an
+                # all-masked row.  Without this, adj[0,0]=0 → all -inf → NaN softmax.
+                adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))
 
             # Edge embeddings
             edge_emb = EdgeEmbedding(
@@ -260,55 +246,10 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
                 name="enc_dec_block",
             )
 
-            if ar_key is not None:
-                init_dec_in = jnp.zeros((groups, n, self.hidden_dim))
-                positions = jnp.arange(n, dtype=jnp.int32)
-                act_dim = int(self.num_actions)
-
-                def _scan_body(carry, pos):
-                    rng, dec_prefix = carry
-                    decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_prefix)
-                    logits_i = _action_head(decoded[:, pos, :])
-
-                    rng, subkey = jax.random.split(rng)
-                    action_i = jax.random.categorical(subkey, logits_i)
-                    log_probs_i = jax.nn.log_softmax(logits_i)
-                    log_prob_i = jnp.take_along_axis(
-                        log_probs_i, action_i[:, None], axis=-1
-                    ).squeeze(-1)
-
-                    next_emb = action_embed(action_i.astype(jnp.int32))
-                    dec_prefix = jax.lax.cond(
-                        pos + 1 < n,
-                        lambda d: d.at[:, pos + 1, :].set(next_emb),
-                        lambda d: d,
-                        dec_prefix,
-                    )
-                    return (rng, dec_prefix), (action_i, log_prob_i, logits_i)
-
-                _, (all_actions, all_log_probs, all_logits) = jax.lax.scan(
-                    _scan_body,
-                    (ar_key, init_dec_in),
-                    positions,
-                )
-
-                actions_flat = all_actions.T.reshape(-1)[:, None]
-                log_probs_flat = all_log_probs.T.reshape(-1)[:, None]
-                logits_flat = all_logits.transpose(1, 0, 2).reshape(-1, act_dim)
-                return actions_flat, {
-                    "log_probs": log_probs_flat,
-                    "logits": logits_flat,
-                    "adj_matrices": adj,
-                    "autoregressive": True,
-                }
-
-            if taken_acts is not None:
-                decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
-                h = decoded.reshape(b, self.hidden_dim)
-            else:
-                dec_in = jnp.zeros((groups, n, self.hidden_dim))
-                decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
-                h = decoded.reshape(b, self.hidden_dim)
+            # Parallel decoder: zero start tokens at both rollout and training.
+            dec_in = jnp.zeros((groups, n, self.hidden_dim))
+            decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
+            h = decoded.reshape(b, self.hidden_dim)
 
             comm_outputs = {
                 "adj_matrices": adj,
@@ -330,18 +271,14 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
         return logits, comm_outputs
 
     def init_state_dict(self, role: str, inputs=None, key=None) -> None:
-        """Ensure batch = num_agents and include gumbel_rng for graph init."""
+        """Ensure batch = num_agents so encoder/decoder params are initialised."""
         if inputs is None:
             obs_sample = self.observation_space.sample()
             obs_batch = jnp.tile(
                 jnp.asarray(obs_sample, dtype=jnp.float32)[None, :],
                 (self.num_agents, 1),
             )
-            inputs = {
-                "states": obs_batch,
-                "taken_actions": jnp.zeros((self.num_agents, 1)),
-                "gumbel_rng": jax.random.PRNGKey(0),
-            }
+            inputs = {"states": obs_batch}
         super().init_state_dict(role, inputs, key)
 
     def act(
@@ -350,24 +287,8 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
         role: str = "",
         params: jax.Array | None = None,
     ) -> tuple[jax.Array, (jax.Array | None), Mapping[str, (jax.Array | Any)]]:
-        if "ar_key" in inputs:
-            with jax.default_device(self.device):
-                p = self.state_dict.params if params is None else params
-                net_output, extra = self.apply(p, inputs, role)
-                actions = net_output
-                log_probs = extra["log_probs"]
-                outputs = {"net_output": net_output}
-                outputs.update(extra)
-                return actions, log_probs, outputs
-
+        # Parallel decoder: same forward path at rollout and training time.
         inputs = dict(inputs)
-        if "taken_actions" in inputs:
-            with jax.default_device(self.device):
-                self._c_i += 1
-                inputs["gumbel_rng"] = jax.random.fold_in(
-                    self._c_key, self._c_i + 1_000_000_000
-                )
-
         actions, log_prob, outputs = super().act(inputs, role, params)
         outputs["stddev"] = outputs["net_output"]
         return actions, log_prob, outputs

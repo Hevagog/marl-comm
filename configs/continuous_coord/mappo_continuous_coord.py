@@ -1,43 +1,53 @@
 # fmt: off
 import jax.numpy as jnp
-from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
+from skrl.resources.preprocessors.jax import RunningStandardScaler
+
+
+# --- Observation / state dimensions for 4-agent, 3-target setup ---
+# obs_dim = 6 + (n-1)*4 + max_targets*4 = 6 + 12 + 12 = 30
+# state_dim = n*4 + max_targets*4 = 16 + 12 = 28
 
 CONFIG = {
     "experiment": {
-        "name":             "magic_blindspot_v5",
-        "agent_type":       "magic",
+        "name":             "mappo_continuous_coord_v1",
+        "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["magic", "blindspot"],
+            "tags":    ["mappo", "continuous_coord"],
         },
-        "write_interval":      "auto",
-        "checkpoint_interval": "auto",
+        "write_interval":      25_000,
+        "checkpoint_interval": 200_000,
         "store_separately":    False,
     },
 
     "env": {
-        "id":            "blindspot",
-        "num_envs":      1,           
-        "grid_size":     9,
-        "max_cycles":    100,
-        "num_traps":     5,
-        "use_communication": False, # Comm handled differentially by MAGIC, not env discrete messages
-        "random_goal":   True,
-        "min_goal_start_distance": 4,
+        "id":                "continuous_coord",
+        "num_envs":          16,
+        "num_agents":        4,
+        "max_cycles":        200,
+        "max_targets":       3,
+        "capture_radius":    0.08,
+        "vision_range":      0.4,
+        "collision_radius":  0.03,
+        "target_arrival_rate":   0.15,
+        "target_k_min":      2,
+        "target_k_max":      3,
+        "target_deadline_min":   30,
+        "target_deadline_max":   80,
+        "chain_event_prob":  0.2,
+        "max_speed":         0.05,
     },
 
     "training": {
-        "timesteps": 8_000_000,
+        "timesteps": 5_000_000,
         "seed":      42,
     },
-
     "eval": {
         "timesteps":       5_000,
         "checkpoint_path": None,
     },
-
     "record": {
         "timesteps":       1_000,
         "checkpoint_path": None,
@@ -45,8 +55,8 @@ CONFIG = {
         "fps":             4,
     },
 
-    "magic": {
-        "rollouts":        4096,      
+    "mappo": {
+        "rollouts":        4096,
         "learning_epochs": 8,
         "mini_batches":    4,
 
@@ -58,9 +68,9 @@ CONFIG = {
         "learning_rate_scheduler_kwargs": {},
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 25},
+        "state_preprocessor_kwargs":         {"size": 30},
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 50},
+        "shared_state_preprocessor_kwargs":  {"size": 28},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -83,31 +93,23 @@ CONFIG = {
         "kl_warmup_fraction": 0.3,
         "debug_kl_stats":     False,
 
-        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 10.0),
-
+        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 15.0),
         "time_limit_bootstrap": True,
 
         "weight_decay":            1e-4,
         "linear_lr_decay":         True,
         "lr_decay_start_fraction": 0.3,
         "min_lr_fraction":         0.1,
-
-        "message_dim":        128,    # Important for coordinating on a 9x9 grid with multiple traps
-        "num_comm_rounds":    2,      
-        "num_heads":          4,      
-        "gumbel_temperature": 0.5,    
     },
 
     "policy": {
-        "hidden_sizes":          [256, 256],  
+        "hidden_sizes":          [256, 256],
         "unnormalized_log_prob": True,
     },
-
     "value": {
-        "hidden_sizes": [256, 256],           
+        "hidden_sizes": [256, 256],
     },
-
     "memory": {
-        "size": 4096,                         
+        "size": 4096,
     },
 }

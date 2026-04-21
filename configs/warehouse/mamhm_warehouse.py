@@ -3,13 +3,13 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
 
 CONFIG = {
     "experiment": {
-        "name":             "mamhm_warehouse_v6",
+        "name":             "mamhm_warehouse_v7",
         "agent_type":       "mamhm",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["mamhm", "warehouse", "v6-adaptive-gate-diversity"],
+            "tags":    ["mamhm", "warehouse", "v7-jax-env"],
         },
         "write_interval":      25000,
         "checkpoint_interval": 200000,
@@ -18,9 +18,10 @@ CONFIG = {
 
     "env": {
         # Same env config as mam_warehouse_v4 for fair comparison
-        "id":            "warehouse",
-        # v2→v3: reverted to 8 (same as MAM v4). The v2 increase to 16
-        # combined with lr=2.5e-4 caused value function instability.
+        # v6→v7: switched to warehouse-jax for ~2-4× throughput gain via
+        # JIT-compiled pure-function steps. Render/analyze tasks auto-fall-back
+        # to the vanilla numpy warehouse via cli.py.
+        "id":            "warehouse-jax",
         "num_envs":      8,
         "grid_height":   12,
         "grid_width":    16,

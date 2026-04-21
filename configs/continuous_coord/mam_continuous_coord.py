@@ -1,7 +1,10 @@
 # fmt: off
+# MAM encoder-only (BiMamba encoder + per-agent MLP head) on continuous coordination env.
+# This config tests the hypothesis that joint observation processing via BiMamba gives
+# a structural advantage over MAPPO's independent processing on coordination tasks
+# that require k-of-n agents to simultaneously rendezvous.
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
-
 
 # --- Observation / state dimensions for 4-agent, 3-target setup ---
 # obs_dim = 6 + (n-1)*4 + max_targets*4 = 6 + 12 + 12 = 30
@@ -9,13 +12,13 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler
 
 CONFIG = {
     "experiment": {
-        "name":             "mappo_continuous_coord_v1",
-        "agent_type":       "mappo",
+        "name":             "mam_enc_only_continuous_coord_v1_16_agents",
+        "agent_type":       "mam_enc_only",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["mappo", "continuous_coord"],
+            "tags":    ["mam_enc_only", "continuous_coord", "16_agents"],
         },
         "write_interval":      "auto",
         "checkpoint_interval": "auto",
@@ -25,7 +28,7 @@ CONFIG = {
     "env": {
         "id":                "continuous_coord",
         "num_envs":          16,
-        "num_agents":        4,
+        "num_agents":        16,
         "max_cycles":        200,
         "max_targets":       3,
         "capture_radius":    0.08,
@@ -44,10 +47,12 @@ CONFIG = {
         "timesteps": 5_000_000,
         "seed":      42,
     },
+
     "eval": {
         "timesteps":       5_000,
         "checkpoint_path": None,
     },
+
     "record": {
         "timesteps":       1_000,
         "checkpoint_path": None,
@@ -55,7 +60,7 @@ CONFIG = {
         "fps":             4,
     },
 
-    "mappo": {
+    "mam": {
         "rollouts":        4096,
         "learning_epochs": 8,
         "mini_batches":    4,
@@ -63,9 +68,12 @@ CONFIG = {
         "discount_factor": 0.99,
         "lambda":          0.95,
 
-        "learning_rate":                  3e-4,
+        "learning_rate":                  1.5e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
+        "linear_lr_decay":          True,
+        "lr_decay_start_fraction":  0.05,
+        "min_lr_fraction":          0.1,
 
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 30},
@@ -82,33 +90,32 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale":       0.02,
+        "entropy_loss_scale":       0.01,
         "entropy_annealing":        True,
         "entropy_loss_scale_start": 0.05,
         "entropy_loss_scale_end":   0.01,
-        "debug_entropy_stats":      False,
         "value_loss_scale":         1.0,
 
-        "kl_threshold":       0.05,
-        "kl_warmup_fraction": 0.3,
-        "debug_kl_stats":     False,
+        "kl_threshold": 0,
 
-        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 15.0),
+        "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -5.0, 15.0),
         "time_limit_bootstrap": True,
 
-        "weight_decay":            1e-4,
-        "linear_lr_decay":         True,
-        "lr_decay_start_fraction": 0.3,
-        "min_lr_fraction":         0.1,
+        "n_embd":      128,
+        "n_block":     1,
+        "d_state":     32,
+        "d_conv":      4,
+        "delta_rank":  16,
     },
 
     "policy": {
-        "hidden_sizes":          [256, 256],
         "unnormalized_log_prob": True,
     },
+
     "value": {
         "hidden_sizes": [256, 256],
     },
+
     "memory": {
         "size": 4096,
     },

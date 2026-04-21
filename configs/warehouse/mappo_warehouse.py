@@ -1,30 +1,25 @@
 # fmt: off
-# Ablation 3: MAM with fixed agent ordering by type
-# Full MAM encoder+decoder with AR, but agents sorted by type before processing.
-# Groups same-type agents consecutively so the AR chain conditions on
-# within-type heterogeneity first. Tests if structured ordering reduces
-# variance in HAPPO advantage decomposition.
 import jax.numpy as jnp
-from skrl.resources.preprocessors.jax import RunningStandardScaler  # noqa: E402
+from skrl.resources.preprocessors.jax import RunningStandardScaler
+
 
 CONFIG = {
     "experiment": {
-        "name":             "mam_ablation3_sorted_16ag",
-        "agent_type":       "mam",
+        "name":             "mappo_warehouse_24_32_16_randomize_layout",
+        "agent_type":       "mappo",
         "directory":        "runs",
         "wandb":            True,
         "wandb_kwargs": {
             "project": "marl-comm",
-            "tags":    ["mam", "warehouse", "ablation3", "16agents", "sorted_agents"],
+            "tags":    ["mappo", "warehouse", "randomize_layout","bigger"],
         },
         "write_interval":      25_000,
-        "checkpoint_interval": 200000,
+        "checkpoint_interval": 200_000,
         "store_separately":    False,
     },
-
     "env": {
         "id":            "warehouse",
-        "num_envs":      8,
+        "num_envs":      8,    
         "grid_height":   24,
         "grid_width":    32,
         "num_agents":    16,
@@ -34,12 +29,13 @@ CONFIG = {
         "num_treatment_stations": 4,
         "num_goal_locations": 2,
         "treatment_duration": 5,
-        "comm_noise_prob":        0.0,
-        "vision_range":           2,
+        "comm_noise_prob":        0.0,   # MAM handles via BiMamba encoder
+        "vision_range":           2,     # 5×5 patch
         "max_cycles":             500,
         "comm_range":             5,
 
         "randomize_layout": True,
+
 
         "enable_task_deadlines":  True,
         "task_arrival_rate":      0.2,
@@ -85,12 +81,10 @@ CONFIG = {
         "timesteps": 20_000_000,
         "seed":      42,
     },
-
     "eval": {
-        "timesteps":       5_000,
+        "timesteps":       1_000,
         "checkpoint_path": None,
     },
-
     "record": {
         "timesteps":       1_000,
         "checkpoint_path": None,
@@ -98,20 +92,15 @@ CONFIG = {
         "fps":             4,
     },
 
-    "mam": {
+    "mappo": {
         "rollouts":        256,
         "learning_epochs": 10,
         "mini_batches":    2,
-
         "discount_factor": 0.99,
         "lambda":          0.95,
-
         "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
-        "linear_lr_decay":          True,
-        "lr_decay_start_fraction":  0.03,
-        "min_lr_fraction":          0.1,
 
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
@@ -128,36 +117,34 @@ CONFIG = {
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale":       0.01,
+        "entropy_loss_scale":       0.02,
         "entropy_annealing":        True,
         "entropy_loss_scale_start": 0.05,
         "entropy_loss_scale_end":   0.01,
-        "value_loss_scale":   1.0,
+        "debug_entropy_stats":      False,
 
-        "kl_threshold": 0,
+        "value_loss_scale":         1.0,
+        "kl_threshold":       0.05,
+        "kl_warmup_fraction": 0.3,
+        "debug_kl_stats":     False,
 
-        "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
+        "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
         "time_limit_bootstrap": True,
-
-        "n_embd":      128,
-        "n_block":     1,
-        "d_state":     64,     # same as mam_warehouse.py (scaled for 16 agents)
-        "d_conv":      4,
-        "delta_rank":  64,
-
-        # Ablation 3: sort agents by type before encoder/decoder
-        "sort_agents_by_type": True,
-        "type_cycle_len":      3,   # 3 agent types: (speed=1,cap=1), (speed=1,cap=2), (speed=2,cap=1)
+        "weight_decay":            1e-4,
+        "linear_lr_decay":         True,
+        "lr_decay_start_fraction": 0.3,
+        "min_lr_fraction":         0.1,
     },
 
     "policy": {
+        "hidden_sizes":          [256, 128],
         "unnormalized_log_prob": True,
+        "use_memory":            False,
     },
-
     "value": {
         "hidden_sizes": [256, 128],
+        "use_memory":   False,
     },
-
     "memory": {
         "size": 256,
     },
