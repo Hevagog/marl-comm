@@ -40,27 +40,30 @@ class MAMEncOnlyMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         policy: Model = self.policies[uid0]  # type: ignore[assignment]
 
-        stacked_obs = jnp.concatenate(
-            [
-                self._state_preprocessor[uid](states[uid])
-                for uid in self.possible_agents
-            ],
-            axis=0,
-        )
+        # Env-major stacking: (num_envs * num_agents, obs_dim)
+        # Layout: [env0/a0, env0/a1, ..., env0/aN-1, env1/a0, ...]
+        # MAMEncoderOnlyPolicyNet reshapes to (num_envs, num_agents, obs_dim);
+        # env-major guarantees each group contains all agents from the same env.
+        preprocessed = [
+            self._state_preprocessor[uid](states[uid])
+            for uid in self.possible_agents
+        ]
+        stacked_obs = jnp.stack(preprocessed, axis=1).reshape(-1, preprocessed[0].shape[-1])
 
         actions_all, log_prob_all, outputs_all = policy.act(
             {"states": stacked_obs},
             role="policy",
         )
 
+        assert log_prob_all is not None, "CategoricalMixin must return log_probs"
         n = len(self.possible_agents)
-        num_envs = stacked_obs.shape[0] // n
         actions: dict[str, jax.Array] = {}
         log_prob: dict[str, jax.Array] = {}
         outputs: dict[str, dict] = {}
 
         for i, uid in enumerate(self.possible_agents):
-            s = slice(i * num_envs, (i + 1) * num_envs)
+            # Env-major output: agent i is at positions i, n+i, 2n+i, ...
+            s = slice(i, None, n)
             actions[uid] = actions_all[s]
             log_prob[uid] = log_prob_all[s]
             outputs[uid] = {}

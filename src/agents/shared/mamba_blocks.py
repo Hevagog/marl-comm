@@ -269,17 +269,19 @@ class Mamba(nn.Module):
 
 # Bidirectional Mamba — replaces non-causal self-attention in encoder
 class BiMambaBlock(nn.Module):
-    """Bidirectional Mamba: forward + reverse with SHARED parameters.
+    """Bidirectional Mamba: forward then backward with SHARED parameters.
 
-    Per MAM paper §3.1 (Daniel et al. 2024), the forward and backward passes
-    share parameters to avoid doubling the BiMamba parameter count while still
-    providing bidirectional context. This matches reference implementations
-    including the InstaDeep MAM repo and the Vision-Mamba ancestor.
+    Matches the InstaDeep MAM reference implementation (BiMambaBlock in
+    mava/networks/mamba_bidirectional_block.py):
+    1. Forward pass on input x  →  h_fwd
+    2. Backward pass on h_fwd   →  h_bwd  (cascaded, not parallel)
+    3. Output: h_fwd * flip(h_bwd)  (multiplicative gate)
 
-    The key insight is that a single MambaBlock can process sequences in either
-    direction — the SSM dynamics learn to extract context regardless of scan
-    direction. Sharing parameters halves the encoder's parameter count per
-    BiMamba block.
+    Shared parameters halve the BiMamba parameter count while still
+    providing bidirectional context (Daniel et al. 2024, §3.1).
+    The cascaded design lets the backward pass refine the forward
+    representation; the multiplicative combination gates each position
+    by consensus between both scan directions.
     """
 
     args: MambaArgs
@@ -288,9 +290,12 @@ class BiMambaBlock(nn.Module):
         self.block = MambaBlock(self.args)
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x_fwd = self._one_dir(self.block, x)
-        x_rev = self._one_dir(self.block, jnp.flip(x, axis=1))
-        return x_fwd + jnp.flip(x_rev, axis=1)
+        # Forward scan on original input
+        h_fwd = self._one_dir(self.block, x)
+        # Backward scan on the forward output (cascaded, per reference)
+        h_bwd = self._one_dir(self.block, jnp.flip(h_fwd, axis=1))
+        # Multiplicative gate: both directions must activate
+        return h_fwd * jnp.flip(h_bwd, axis=1)
 
     @staticmethod
     def _one_dir(block: MambaBlock, x: jax.Array) -> jax.Array:

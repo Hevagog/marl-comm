@@ -64,14 +64,15 @@ class MAMMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         policy: Model = self.policies[uid0]  # type: ignore[assignment]
 
-        # Stack observations from all agents: (num_agents * num_envs, obs_dim)
-        stacked_obs = jnp.concatenate(
-            [
-                self._state_preprocessor[uid](states[uid])
-                for uid in self.possible_agents
-            ],
-            axis=0,
-        )
+        # Stack observations in env-major order: (num_envs * num_agents, obs_dim)
+        # Layout: [env0/a0, env0/a1, ..., env0/aN-1, env1/a0, ...]
+        # This ensures MAMPolicyNet's reshape (groups, n, obs_dim) gives correct
+        # agent groups where each row-block is all agents from the same environment.
+        preprocessed = [
+            self._state_preprocessor[uid](states[uid])
+            for uid in self.possible_agents
+        ]
+        stacked_obs = jnp.stack(preprocessed, axis=1).reshape(-1, preprocessed[0].shape[-1])
 
         # Generate autoregressive key for this timestep
         with jax.default_device(policy.device):
