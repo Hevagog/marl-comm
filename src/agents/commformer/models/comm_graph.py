@@ -38,9 +38,17 @@ class CommGraph(nn.Module):
     sparsity: float = 0.4
 
     def setup(self):
+        # stddev=1.0: larger initial spread stabilises the graph topology
+        # during early training.  With stddev=0.1, differences between α_{ij}
+        # entries are ~0.1 — a single noisy gradient step can flip which k
+        # agents are in the top-k, producing an unstable communication graph
+        # before the policy has learned anything useful.  With stddev=1.0,
+        # ~10× more gradient is required to change the selected neighbours,
+        # so the graph remains stable long enough for the encoder to start
+        # producing useful representations.
         self.alpha = self.param(
             "alpha",
-            nn.initializers.normal(stddev=0.1),
+            nn.initializers.normal(stddev=1.0),
             (self.num_agents, self.num_agents),
         )
 

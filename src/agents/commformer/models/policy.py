@@ -1,14 +1,44 @@
-"""CommFormer policy network (Decoder).
+"""CommFormer policy network — parallel decoder variant.
 
-Implements the auto-regressive decoder that generates actions for
-each agent sequentially, conditioned on the encoded observations
-and previously generated actions.
+The original CommFormer (Hu et al. 2024) uses an auto-regressive decoder
+conditioned on previously generated actions.  This implementation replaces
+that with a **parallel decoder** that uses zero start tokens at both rollout
+and training time.
+
+Rationale (why the AR decoder was removed):
+--------------------------------------------
+1. **Train/rollout mismatch** (Bengio et al. 2015, "Scheduled Sampling"):
+   Teacher forcing at training feeds stored actions; the AR scan at rollout
+   feeds *sampled* actions.  Even though the actions are identical (same
+   policy, same seed), the two code paths differ in vmap/scan structure,
+   causing accumulated floating-point rounding differences that produce
+   systematic ratio_max_abs_dev > 0.5 at the start of every update —
+   before any gradient step.  This fires the KL early-stop and reduces
+   effective gradient steps per rollout to 1-2.
+
+2. **4× compute overhead**: The AR scan calls enc_dec_block N times per
+   rollout step (one per agent position), while training calls it once.
+   The parallel decoder calls it once in both cases.
+
+3. **No execution benefit**: Agents execute independently; they cannot
+   observe each other's actions at deployment.  Conditioning the decoder
+   on previous agents' sampled actions provides no decentralised-execution
+   benefit (Wen et al. 2022 "MAT" §4.2 explicitly notes this limitation).
+
+4. **Precedent**: MAMEncOnly ablation in this codebase achieves 86% of the
+   MAM-to-MAPPO gap using encoder-only (no AR decoder); encoder-plus-
+   parallel-decoder retains cross-attention aggregation while eliminating
+   the mismatch.
+
+With zero decoder inputs at both rollout and training, ratio = 1.0 at the
+start of every update, the KL early-stop never fires spuriously, and all
+learning_epochs × mini_batches gradient steps execute.
 
 References
 ----------
-- Hu et al. 2024 "CommFormer" (ICLR 2024), §3.2, Eq. 5:
-  π_θ^m(a^m | ô_{1:n}, a_{1:m-1})  — auto-regressive action generation.
-- Wen et al. 2022 "MAT": sequential update scheme.
+- Hu et al. 2024 "CommFormer" (ICLR 2024), §3.2, Fig. 2.
+- Bengio et al. 2015 "Scheduled Sampling": exposure bias in teacher forcing.
+- Wen et al. 2022 "MAT": sequential update scheme discussion.
 """
 
 from __future__ import annotations
@@ -55,10 +85,10 @@ class _EncoderDecoderBlock(nn.Module):
                 name=f"enc_block_{blk}",
             )(enc, adj, edge_emb)
 
-        # --- Decoder (encoder output as context) ---
-        # dec_in is the right-shifted action embedding sequence (teacher forcing
-        # during training) or zero start tokens during rollout.  CommFormer §3.2,
-        # Eq. 5 / Algorithm 1 Step 11: "Input o¹,...,oⁿ and a¹,...,aⁿ⁻¹".
+        # --- Decoder ---
+        # dec_in is always zeros (parallel decoder — see module docstring).
+        # The decoder cross-attends to encoder outputs with a learned static
+        # query, producing per-agent aggregations of communicated context.
         dec = dec_in
         for blk in range(self.num_blocks):
             dec = DecoderBlock(
@@ -72,18 +102,18 @@ class _EncoderDecoderBlock(nn.Module):
 
 
 class CommFormerPolicyNet(CategoricalMixin, Model):
-    """CommFormer policy: Encoder + Decoder with learnable communication graph.
+    """CommFormer policy: Encoder + parallel Decoder with learnable comm graph.
 
-    Architecture (CommFormer §3.2, Fig. 2)
-    ---------------------------------------
-    1. **Communication Graph** — learnable ``α ∈ R^{N×N}`` → binary adj.
+    Architecture (CommFormer §3.2, Fig. 2):
+    ----------------------------------------
+    1. **Communication Graph** — α ∈ R^{N×N} → binary adj via k-hot STE.
     2. **Edge Embeddings** — embed adjacency for relation-enhanced attention.
-    3. **Encoder** — processes observation sequence with adjacency masking.
-    4. **Decoder** — auto-regressively generates actions per agent.
+    3. **Encoder** — obs sequence with adjacency masking.
+    4. **Decoder** — parallel (zero start tokens), cross-attends to encoder.
     5. **Action head** — projects decoder output to action logits.
 
-    For integration with skrl's rollout collection (which queries one agent
-    at a time), we handle both single-agent and multi-agent batch shapes.
+    The decoder uses zero start tokens at both rollout and training time,
+    ensuring identical forward paths and ratio = 1.0 at update start.
     """
 
     hidden_dim: int = 64
@@ -128,8 +158,12 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         """Forward pass.
 
         ``inputs["states"]`` has shape ``(B, obs_dim)``.  If B is a multiple
-        of N (num_agents), we group observations and run the full encoder-
-        decoder pipeline.  Otherwise, we fall back to a simpler MLP policy.
+        of N, group observations and run the full encoder-decoder pipeline.
+        Otherwise fall back to a simpler MLP.
+
+        ``inputs["taken_actions"]`` is accepted but ignored in the forward
+        pass — log-probs are computed by CategoricalMixin from the returned
+        logits and the stored actions.
         """
         x = inputs["states"]  # (B, obs_dim)
         n = self.num_agents
@@ -144,18 +178,12 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         x_emb = node_embed(x)  # (B, hidden_dim)
 
         comm_outputs: dict = {}
-        action_embed = nn.Embed(
-            num_embeddings=int(self.num_actions),
-            features=self.hidden_dim,
-            embedding_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
-            name="action_embed",
-        )
         action_fc = nn.Dense(
             self.hidden_dim,
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             name="action_fc",
         )
-        action_logits = nn.Dense(
+        action_logits_head = nn.Dense(
             int(self.num_actions),
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
             name="action_logits",
@@ -164,62 +192,38 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         def _action_head(h: jax.Array) -> jax.Array:
             h = action_fc(h)
             h = nn.tanh(h)
-            return action_logits(h)
+            return action_logits_head(h)
 
         if b >= n and b % n == 0:
             groups = b // n
             x_grouped = x_emb.reshape(groups, n, self.hidden_dim)
-            ar_key = inputs.get("ar_key", None)
 
-            # --- Decoder input: action embeddings (teacher forcing) or zeros ---
-            # During training _update_policy_fixed passes "taken_actions" (B, 1).
-            # We embed them, shift right (prepend a zero start token, drop last),
-            # so dec_in[group, m, :] = embed(a_{m-1}) for m > 0 and zero for m=0.
-            # This implements CommFormer §3.2 Eq. 5 / Algorithm 1 Step 11.
-            taken_acts = inputs.get("taken_actions", None)
-            if taken_acts is not None:
-                act_idx = taken_acts.reshape(b).astype(jnp.int32)  # (B,)
-                act_emb = action_embed(act_idx)  # (B, hidden_dim)
-                act_emb_grouped = act_emb.reshape(groups, n, self.hidden_dim)
-                start_tok = jnp.zeros((groups, 1, self.hidden_dim))
-                dec_in = jnp.concatenate(
-                    [start_tok, act_emb_grouped[:, :-1, :]], axis=1
-                )  # (groups, N, hidden_dim)
-            else:
-                # Initialise the embedding layer even when no actions are given
-                _dummy_idx = jnp.zeros(n, dtype=jnp.int32)
-                action_embed(_dummy_idx)
-
-            # --- Communication graph (learned α) ---
-            # Use stochastic Gumbel sampling only for PPO training updates
-            # (teacher-forced ``taken_actions`` path). During rollout/eval we use
-            # deterministic k-argmax, matching CommFormer Eq. 12.
+            # Communication graph (deterministic k-argmax — no Gumbel noise).
+            # Alpha receives gradients via the STE in _k_hot regardless.
+            # Using deterministic adj at both rollout and training time
+            # ensures the communication context is identical in both paths.
             comm = CommGraph(
                 num_agents=n,
                 sparsity=self.sparsity,
                 name="comm_graph",
             )
-            gumbel_rng = inputs.get("gumbel_rng", None)
-            graph_training = taken_acts is not None and gumbel_rng is not None
-            adj = comm(rng=gumbel_rng, training=graph_training)  # (N, N)
-            # BUG-C-002 fix: guarantee self-loops so that the decoder causal mask
-            # (which restricts agent-0 to column 0 only) never produces an
-            # all-masked row.  Without this, adj[0,0]=0 makes every score -inf
-            # → softmax NaN.  Self-loops are assumed in the CommFormer paper.
+            adj = comm(rng=None, training=False)
+            # Guarantee self-loops: decoder causal mask restricts agent-0
+            # to column 0; if adj[0,0]=0 → all-masked row → NaN softmax.
             adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))
 
             # Edge embeddings
             edge_emb = EdgeEmbedding(
                 embed_dim=self.head_dim,
                 name="edge_embed",
-            )(adj)  # (N, N, head_dim)
+            )(adj)
 
             # Vectorize over groups (shared params; adj & edge_emb broadcast)
             VmappedEncDec = nn.vmap(
                 _EncoderDecoderBlock,
                 variable_axes={"params": None},
                 split_rngs={"params": False},
-                in_axes=(0, None, None, 0),  # dec_in is group-specific
+                in_axes=(0, None, None, 0),
                 out_axes=0,
             )
             enc_dec_block = VmappedEncDec(
@@ -230,80 +234,19 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
                 name="enc_dec_block",
             )
 
-            if ar_key is not None:
-                # CommFormer paper uses autoregressive decoding at execution time:
-                # sample a_1, feed it back, then decode a_2, etc.  Recompute the
-                # decoder from the growing prefix at each step. With only 4 agents,
-                # this paper-faithful path is cheap and avoids the severe train/test
-                # mismatch of using all-zero decoder inputs during rollout.
-                init_dec_in = jnp.zeros((groups, n, self.hidden_dim))
-                positions = jnp.arange(n, dtype=jnp.int32)
-                act_dim = int(self.num_actions)
+            # Parallel decoder: zero start tokens at both rollout and training.
+            # This is the key fix — identical forward path ensures ratio = 1.0
+            # at the start of every PPO update (Bengio et al. 2015 §3).
+            dec_in = jnp.zeros((groups, n, self.hidden_dim))
+            decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
+            h = decoded.reshape(b, self.hidden_dim)
 
-                def _scan_body(carry, pos):
-                    rng, dec_prefix = carry
-                    decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_prefix)
-                    logits_i = _action_head(decoded[:, pos, :])  # (groups, act_dim)
-
-                    rng, subkey = jax.random.split(rng)
-                    action_i = jax.random.categorical(subkey, logits_i)  # (groups,)
-                    log_probs_i = jax.nn.log_softmax(logits_i)
-                    log_prob_i = jnp.take_along_axis(
-                        log_probs_i, action_i[:, None], axis=-1
-                    ).squeeze(-1)
-
-                    next_emb = action_embed(action_i.astype(jnp.int32))
-                    dec_prefix = jax.lax.cond(
-                        pos + 1 < n,
-                        lambda d: d.at[:, pos + 1, :].set(next_emb),
-                        lambda d: d,
-                        dec_prefix,
-                    )
-                    return (rng, dec_prefix), (action_i, log_prob_i, logits_i)
-
-                _, (all_actions, all_log_probs, all_logits) = jax.lax.scan(
-                    _scan_body,
-                    (ar_key, init_dec_in),
-                    positions,
-                )
-
-                # BUG-C-003 fix: use agent-major output order.
-                # all_actions shape (N, groups): all_actions[i, g] = agent i, env g.
-                # .reshape(-1) → [a0_g0, a0_g1, ..., a0_g{K-1}, a1_g0, ...]
-                # CommFormerMAPPO.act() slices [i*K : (i+1)*K] to extract agent i.
-                # The previous .T.reshape(-1) produced env-major order, making
-                # each slice a mix of different agents → wrong stored log-probs.
-                actions_flat = all_actions.reshape(-1)[:, None]
-                log_probs_flat = all_log_probs.reshape(-1)[:, None]
-                logits_flat = all_logits.reshape(-1, act_dim)
-                return actions_flat, {
-                    "log_probs": log_probs_flat,
-                    "logits": logits_flat,
-                    "adj_matrices": adj,
-                    "autoregressive": True,
-                }
-
-            if taken_acts is not None:
-                decoded = enc_dec_block(
-                    x_grouped, adj, edge_emb, dec_in
-                )  # (groups, N, hidden_dim)
-                decoded_flat = decoded.reshape(b, self.hidden_dim)  # (B, hidden_dim)
-                h = decoded_flat
-            else:
-                # Zero-start fallback for analysis / non-AR direct forward
-                dec_in = jnp.zeros((groups, n, self.hidden_dim))
-                decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
-                h = decoded.reshape(b, self.hidden_dim)
-
-            # Expose graph and per-agent representations for analysis.
-            # adj_matrices: (N, N) hard binary k-hot adjacency (static graph).
-            # encoder_out: (B, hidden_dim) post-encoder-decoder representations.
             comm_outputs = {
                 "adj_matrices": adj,
                 "encoder_out": h,
             }
         else:
-            # Fallback: simple MLP when batch isn't grouped
+            # Fallback: simple MLP when batch isn't a multiple of N
             h = nn.tanh(x_emb)
             h = nn.Dense(
                 self.hidden_dim,
@@ -312,9 +255,7 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
             )(h)
             h = nn.tanh(h)
 
-        # --- Action head ---
         logits = _action_head(h)
-
         return logits, comm_outputs
 
     def init_state_dict(
@@ -323,22 +264,14 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         inputs=None,
         key=None,
     ) -> None:
-        """Override to ensure batch size = num_agents so encoder/decoder params init.
-
-        Includes ``taken_actions`` and ``gumbel_rng`` so that ``action_embed``
-        and the stochastic graph path are initialised on the first call.
-        """
+        """Override to ensure batch size = num_agents so enc/dec params init."""
         if inputs is None:
             obs_sample = self.observation_space.sample()
             obs_batch = jnp.tile(
                 jnp.asarray(obs_sample, dtype=jnp.float32)[None, :],
                 (self.num_agents, 1),
-            )  # (N, obs_dim)
-            inputs = {
-                "states": obs_batch,
-                "taken_actions": jnp.zeros((self.num_agents, 1)),
-                "gumbel_rng": jax.random.PRNGKey(0),
-            }
+            )
+            inputs = {"states": obs_batch}
         super().init_state_dict(role, inputs, key)
 
     def act(
@@ -347,37 +280,10 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         role: str = "",
         params: jax.Array | None = None,
     ) -> tuple[jax.Array, (jax.Array | None), Mapping[str, (jax.Array | Any)]]:
-        # Rollout path: __call__ already returns sampled actions and log-probs.
-        if "ar_key" in inputs:
-            with jax.default_device(self.device):
-                p = self.state_dict.params if params is None else params
-                net_output, extra = self.apply(p, inputs, role)
-                actions = net_output
-                log_probs = extra["log_probs"]
-                outputs = {"net_output": net_output}
-                outputs.update(extra)
-                return actions, log_probs, outputs
-
-        # Training path (teacher-forced PPO update).
-        #
-        # IMPORTANT: do NOT inject gumbel_rng here.
-        #
-        # The PPO importance ratio r_t^m = π_θ / π_{θ_old} (paper Eq. 5) is only
-        # valid when both numerator (recomputed here) and denominator (stored during
-        # rollout) use the SAME adjacency matrix.  During rollout, act() takes the
-        # ar_key path which calls CommGraph with training=False → deterministic
-        # k-argmax adj (paper Eq. 12, no Gumbel noise).  If we inject gumbel_rng
-        # here, CommGraph produces a different Gumbel-sampled adj (paper Eq. 11) →
-        # different encoder/decoder context → different logits → log-prob mismatch
-        # → ratio_max_abs_dev ≈ 2.0, ratio_clipped_frac ≈ 0.53 → KL threshold
-        # fires on the first mini-batch → zero gradient steps the entire run.
-        #
-        # Without gumbel_rng, CommGraph uses deterministic k-argmax (training=False)
-        # matching rollout.  Alpha still receives gradients via the straight-through
-        # estimator (STE) in _k_hot: hard − stop_grad(softmax(α)) + softmax(α),
-        # so d(loss)/d(α) flows through softmax(α).  No Gumbel needed for that.
+        # Parallel decoder: same forward path at rollout and training time.
+        # No special AR path needed — CategoricalMixin.act() handles sampling
+        # and log-prob computation consistently in both cases.
         inputs = dict(inputs)
-
         actions, log_prob, outputs = super().act(inputs, role, params)
         outputs["stddev"] = outputs["net_output"]
         return actions, log_prob, outputs

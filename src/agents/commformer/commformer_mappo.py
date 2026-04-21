@@ -90,26 +90,31 @@ class CommFormerMAPPO(CategoricalMAPPO):
             -1, preprocessed[0].shape[-1]
         )
 
-        # Generate autoregressive key for execution-time decoding.
-        with jax.default_device(policy.device):
-            policy._c_i += 1
-            ar_key = jax.random.fold_in(policy._c_key, policy._c_i)  # type: ignore[attr-defined]
-
+        # Parallel decoder: no AR key needed.  Same zero-dec_in forward path
+        # is used at rollout and training — ratio = 1.0 at update start.
         actions_all, log_prob_all, outputs_all = policy.act(
-            {"states": stacked_obs, "ar_key": ar_key},
+            {"states": stacked_obs},
             role="policy",
         )
-        assert log_prob_all is not None, "log_prob_all should not be None in AR mode"
+        assert log_prob_all is not None, "log_prob_all should not be None"
 
-        # Split results per agent
+        # Split results per agent.
+        #
+        # The stacked_obs layout is env-major (from jnp.stack(axis=1).reshape):
+        #   [env0/a0, env0/a1, ..., env0/aN-1, env1/a0, ..., envM/aN-1]
+        # so agent i's outputs sit at stride-N positions: i, N+i, 2N+i, …
+        # Using slice(i*num_envs, (i+1)*num_envs) here was an agent-major
+        # slice — correct for the old axis=0 concatenation (BUG-C-003) but
+        # wrong after the env-major stacking fix, producing 12/16 mismatched
+        # (obs, action, log_prob) triplets in the buffer and garbage IS ratios.
         n = len(self.possible_agents)
-        num_envs = actions_all.shape[0] // n
         actions: dict[str, jax.Array] = {}
         log_prob: dict[str, jax.Array] = {}
         outputs: dict[str, dict] = {}
 
         for i, uid in enumerate(self.possible_agents):
-            s = slice(i * num_envs, (i + 1) * num_envs)
+            # stride-N: picks env0/ai, env1/ai, env2/ai, … in order
+            s = slice(i, None, n)
             actions[uid] = actions_all[s]
             log_prob[uid] = log_prob_all[s]
             outputs[uid] = {}
