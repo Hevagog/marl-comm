@@ -208,20 +208,18 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
                 alpha_raw = adj
             else:
                 # Full CTDE communication graph.
-                # Always use deterministic k-argmax (CommFormer Eq. 12):
-                # same adj at rollout and training ensures consistent log-probs.
-                # Alpha receives gradients via the straight-through estimator.
+                # Gumbel-Max at rollout (CommFormer Eq. 11, exploration),
+                # deterministic k-argmax at update (ratio stability).
+                # inputs["taken_actions"] present ↔ PPO update path.
+                # inputs["key"] from CategoricalMixin.act is reused as rng.
+                _in_update = "taken_actions" in inputs
+                _gumbel_rng = None if _in_update else inputs.get("key", None)
                 comm = CommGraph(
                     num_agents=n,
                     sparsity=self.sparsity,
                     name="comm_graph",
                 )
-                # BUG-HM-001 fix: never inject gumbel_rng at training time.
-                # Rollout uses ar_key path with deterministic adj (training=False).
-                # Training must also use deterministic adj so that the recomputed
-                # log-probs match the stored rollout log-probs → ratio ≈ 1 → KL stable.
-                # Alpha still receives gradients via the STE in _k_hot.
-                adj, alpha_raw = comm(rng=None, training=False)
+                adj, alpha_raw = comm(rng=_gumbel_rng, training=not _in_update)
                 # BUG-HM-003 fix: guarantee self-loops so that the decoder causal
                 # mask (agent-0 restricted to column 0 only) never produces an
                 # all-masked row.  Without this, adj[0,0]=0 → all -inf → NaN softmax.

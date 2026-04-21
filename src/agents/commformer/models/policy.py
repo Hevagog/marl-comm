@@ -164,6 +164,12 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         ``inputs["taken_actions"]`` is accepted but ignored in the forward
         pass — log-probs are computed by CategoricalMixin from the returned
         logits and the stored actions.
+
+        ``inputs["key"]`` — when present and no ``taken_actions`` key, we are
+        in rollout mode and pass the key to CommGraph for Gumbel-Max sampling
+        (CommFormer Eq. 11).  During the PPO update (``taken_actions`` present),
+        deterministic k-argmax is used so adj is identical to the stored
+        rollout adj and ratio = 1 at update start.
         """
         x = inputs["states"]  # (B, obs_dim)
         n = self.num_agents
@@ -198,16 +204,21 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
             groups = b // n
             x_grouped = x_emb.reshape(groups, n, self.hidden_dim)
 
-            # Communication graph (deterministic k-argmax — no Gumbel noise).
-            # Alpha receives gradients via the STE in _k_hot regardless.
-            # Using deterministic adj at both rollout and training time
-            # ensures the communication context is identical in both paths.
+            # Communication graph: Gumbel-Max at rollout (exploration),
+            # deterministic k-argmax at update (ratio stability).
+            # Detected via taken_actions: present ↔ PPO update path.
+            # At rollout, CategoricalMixin.act injects inputs["key"] which
+            # we reuse so no extra rng infrastructure is needed.
+            _in_update = "taken_actions" in inputs
+            _gumbel_rng = (
+                None if _in_update else inputs.get("key", None)
+            )
             comm = CommGraph(
                 num_agents=n,
                 sparsity=self.sparsity,
                 name="comm_graph",
             )
-            adj, alpha_raw = comm(rng=None, training=False)
+            adj, alpha_raw = comm(rng=_gumbel_rng, training=not _in_update)
             # Guarantee self-loops: decoder causal mask restricts agent-0
             # to column 0; if adj[0,0]=0 → all-masked row → NaN softmax.
             adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))

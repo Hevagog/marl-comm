@@ -697,6 +697,17 @@ class CategoricalMAPPO(MAPPO):
         apply_kl_stop = True
         if timesteps > 0 and kl_warmup_fraction > 0.0:
             apply_kl_stop = timestep > (timesteps * kl_warmup_fraction)
+        # ratio_max_threshold: stop the epoch loop when any mini-batch's
+        # ratio_max_abs_dev exceeds this value.  Mean KL (kl_threshold) can
+        # remain below 0.05 even at ratio_mad=14 because the high-ratio
+        # outlier transitions are diluted across the full buffer.  Checking
+        # ratio_max_abs_dev directly catches per-transition drift that mean
+        # KL misses.  None means disabled (backward-compatible default).
+        _ratio_max_threshold: float | None = (
+            float(self.cfg["ratio_max_threshold"])
+            if self.cfg.get("ratio_max_threshold") is not None
+            else None
+        )
 
         #  Mini-batch training
         if self._shared_policy:
@@ -711,6 +722,7 @@ class CategoricalMAPPO(MAPPO):
                 apply_kl_stop,
                 timestep,
                 timesteps,
+                _ratio_max_threshold,
             )
         else:
             # Heterogeneous path: update each agent's policy independently
@@ -724,6 +736,7 @@ class CategoricalMAPPO(MAPPO):
                 apply_kl_stop,
                 timestep,
                 timesteps,
+                _ratio_max_threshold,
             )
 
     def _update_shared_policy(
@@ -735,6 +748,7 @@ class CategoricalMAPPO(MAPPO):
         apply_kl_stop,
         timestep,
         timesteps,
+        ratio_max_threshold: float | None = None,
     ) -> None:  # noqa: C901
         """Training update for homogeneous agents (shared policy network).
 
@@ -803,10 +817,12 @@ class CategoricalMAPPO(MAPPO):
                 for k, v in diag.items():
                     cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
-                if (
-                    apply_kl_stop
-                    and self._kl_threshold[uid0]
-                    and kl_divergence > self._kl_threshold[uid0]
+                if apply_kl_stop and (
+                    (self._kl_threshold[uid0] and kl_divergence > self._kl_threshold[uid0])
+                    or (
+                        ratio_max_threshold is not None
+                        and float(diag["ratio_max_abs_dev"]) > ratio_max_threshold
+                    )
                 ):
                     kl_exceeded = True
                     break
@@ -879,6 +895,7 @@ class CategoricalMAPPO(MAPPO):
         apply_kl_stop,
         timestep,
         timesteps,
+        ratio_max_threshold: float | None = None,
     ) -> None:  # noqa: C901
         """Training update for heterogeneous agents (per-agent policy networks).
 
@@ -959,10 +976,12 @@ class CategoricalMAPPO(MAPPO):
                     for k, v in diag.items():
                         cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
-                    if (
-                        apply_kl_stop
-                        and self._kl_threshold[uid]
-                        and kl_divergence > self._kl_threshold[uid]
+                    if apply_kl_stop and (
+                        (self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid])
+                        or (
+                            ratio_max_threshold is not None
+                            and float(diag["ratio_max_abs_dev"]) > ratio_max_threshold
+                        )
                     ):
                         kl_exceeded = True
                         break
