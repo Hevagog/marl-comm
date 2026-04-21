@@ -234,10 +234,18 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
                 name="enc_dec_block",
             )
 
-            # Parallel decoder: zero start tokens at both rollout and training.
-            # This is the key fix — identical forward path ensures ratio = 1.0
-            # at the start of every PPO update (Bengio et al. 2015 §3).
-            dec_in = jnp.zeros((groups, n, self.hidden_dim))
+            # Per-agent slot queries as decoder start tokens (same fix as MAT).
+            # Zero dec_in → all agents get uniform attention → identical decoder
+            # output → no type specialisation.  Learnable slot_queries break the
+            # symmetry from step 1 while preserving ratio = 1.0 (obs-independent).
+            slot_queries = self.param(
+                "slot_queries",
+                nn.initializers.normal(stddev=1.0),
+                (n, self.hidden_dim),
+            )
+            dec_in = jnp.broadcast_to(
+                slot_queries[None, :, :], (groups, n, self.hidden_dim)
+            )
             decoded = enc_dec_block(x_grouped, adj, edge_emb, dec_in)
             h = decoded.reshape(b, self.hidden_dim)
 

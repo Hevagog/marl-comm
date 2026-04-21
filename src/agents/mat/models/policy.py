@@ -392,9 +392,27 @@ class MATPolicyNet(CategoricalMixin, Model):
                 name="enc_dec_block",
             )
 
-            # Parallel decoder: zero start tokens at both rollout and training.
-            # ratio = 1.0 at every PPO update start (Bengio et al. 2015 §3).
-            dec_in = jnp.zeros((groups, n, self.hidden_dim))
+            # Per-agent slot queries as decoder start tokens.
+            #
+            # Zero start tokens cause all N agents to receive identical decoder
+            # output at initialisation: with dec_in=0, LayerNorm(0)=0, all
+            # cross-attention queries are zero → uniform attention over encoder
+            # → mean(enc_out) for every position → all agents get the same
+            # logits.  In the typed blind-coordination task ([0,0,1,1] types)
+            # this means agents cannot specialise by type from day 1.
+            #
+            # Learnable slot_queries (one per agent slot, init normal σ=1.0):
+            #   • Different per position → distinct decoder outputs immediately
+            #   • Obs-independent → ratio = 1.0 invariant is preserved
+            #   • Learned specialisation replaces AR action conditioning
+            slot_queries = self.param(
+                "slot_queries",
+                nn.initializers.normal(stddev=1.0),
+                (n, self.hidden_dim),
+            )  # (N, hidden_dim) — broadcast over groups
+            dec_in = jnp.broadcast_to(
+                slot_queries[None, :, :], (groups, n, self.hidden_dim)
+            )
             decoded = enc_dec_block(x_grouped, dec_in)
             h = decoded.reshape(b, self.hidden_dim)
 
