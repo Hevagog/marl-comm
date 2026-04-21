@@ -203,6 +203,9 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
             if self.execution_mode == "local_only":
                 # No communication: identity adjacency (each agent attends to self only)
                 adj = jnp.eye(n)
+                # No learnable α in local_only mode — embed the identity itself
+                # so edge_emb is well-defined in the branch that follows.
+                alpha_raw = adj
             else:
                 # Full CTDE communication graph.
                 # Always use deterministic k-argmax (CommFormer Eq. 12):
@@ -218,17 +221,18 @@ class CommFormerHMPolicyNet(CategoricalMixin, Model):
                 # Training must also use deterministic adj so that the recomputed
                 # log-probs match the stored rollout log-probs → ratio ≈ 1 → KL stable.
                 # Alpha still receives gradients via the STE in _k_hot.
-                adj = comm(rng=None, training=False)
+                adj, alpha_raw = comm(rng=None, training=False)
                 # BUG-HM-003 fix: guarantee self-loops so that the decoder causal
                 # mask (agent-0 restricted to column 0 only) never produces an
                 # all-masked row.  Without this, adj[0,0]=0 → all -inf → NaN softmax.
                 adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))
 
-            # Edge embeddings
+            # Edge embeddings consume continuous α (CommFormer Eq. 2) — using
+            # binary adj would collapse to 2 distinct vectors.
             edge_emb = EdgeEmbedding(
                 embed_dim=self.head_dim,
                 name="edge_embed",
-            )(adj)
+            )(alpha_raw)
 
             # Vectorize over groups
             VmappedEncDec = nn.vmap(

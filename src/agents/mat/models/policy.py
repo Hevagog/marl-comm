@@ -405,9 +405,14 @@ class MATPolicyNet(CategoricalMixin, Model):
             #   • Different per position → distinct decoder outputs immediately
             #   • Obs-independent → ratio = 1.0 invariant is preserved
             #   • Learned specialisation replaces AR action conditioning
+            # stddev=0.02 (Perceiver/Q-Former convention) — keeps queries small
+            # relative to LayerNorm'd encoder output (std ≈ 1) at init.  This breaks
+            # the all-agents-identical symmetry without dominating the attention
+            # distribution from step 1.  Previous stddev=1.0 biased attention toward
+            # query content before any useful encoder features exist.
             slot_queries = self.param(
                 "slot_queries",
-                nn.initializers.normal(stddev=1.0),
+                nn.initializers.normal(stddev=0.02),
                 (n, self.hidden_dim),
             )  # (N, hidden_dim) — broadcast over groups
             dec_in = jnp.broadcast_to(

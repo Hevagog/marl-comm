@@ -38,17 +38,17 @@ class CommGraph(nn.Module):
     sparsity: float = 0.4
 
     def setup(self):
-        # stddev=1.0: larger initial spread stabilises the graph topology
-        # during early training.  With stddev=0.1, differences between α_{ij}
-        # entries are ~0.1 — a single noisy gradient step can flip which k
-        # agents are in the top-k, producing an unstable communication graph
-        # before the policy has learned anything useful.  With stddev=1.0,
-        # ~10× more gradient is required to change the selected neighbours,
-        # so the graph remains stable long enough for the encoder to start
-        # producing useful representations.
+        # stddev=0.1 matches the CommFormer reference implementation
+        # (github.com/charleshsc/CommFormer, graph.py).  With stddev=1.0,
+        # initial α differences dominate gradient updates: the STE path
+        # produces gradients of order ~1e-7 (measured), so top-k never
+        # flips from its random init and the learnable graph is
+        # effectively frozen.  With stddev=0.1, initial entries are on
+        # the same order as accumulated gradients over a few updates,
+        # allowing the top-k selection to reflect learned signal.
         self.alpha = self.param(
             "alpha",
-            nn.initializers.normal(stddev=1.0),
+            nn.initializers.normal(stddev=0.1),
             (self.num_agents, self.num_agents),
         )
 
@@ -56,13 +56,17 @@ class CommGraph(nn.Module):
         self,
         rng: jax.Array | None = None,
         training: bool = True,
-    ) -> jax.Array:
+    ) -> tuple[jax.Array, jax.Array]:
         """
         Returns
         -------
         adj : jax.Array, shape ``(N, N)``
             Binary adjacency matrix where ``adj[i, j] = 1`` means agent j
             sends a message to agent i.
+        alpha : jax.Array, shape ``(N, N)``
+            Raw continuous parameter (pre-top-k).  Consumers that embed
+            relational magnitude (CommFormer §3.2, Eq. 2) should use this
+            rather than the binary adj.
         """
         n = self.num_agents
         k = max(1, int(round(self.sparsity * n)))
@@ -77,7 +81,7 @@ class CommGraph(nn.Module):
 
         # k-hot: select top-k per row
         adj = _k_hot(perturbed, k)
-        return adj
+        return adj, self.alpha
 
 
 def _k_hot(logits: jax.Array, k: int) -> jax.Array:

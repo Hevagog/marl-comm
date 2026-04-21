@@ -207,16 +207,20 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
                 sparsity=self.sparsity,
                 name="comm_graph",
             )
-            adj = comm(rng=None, training=False)
+            adj, alpha_raw = comm(rng=None, training=False)
             # Guarantee self-loops: decoder causal mask restricts agent-0
             # to column 0; if adj[0,0]=0 → all-masked row → NaN softmax.
             adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))
 
-            # Edge embeddings
+            # Edge embeddings consume the continuous α (CommFormer §3.2,
+            # Eq. 2: "r_{*→*} is obtained from an embedding layer that
+            # takes the adjacency matrix α as input").  Using binary adj
+            # here would collapse edge_emb to only 2 distinct vectors,
+            # discarding the relational magnitude the paper wants.
             edge_emb = EdgeEmbedding(
                 embed_dim=self.head_dim,
                 name="edge_embed",
-            )(adj)
+            )(alpha_raw)
 
             # Vectorize over groups (shared params; adj & edge_emb broadcast)
             VmappedEncDec = nn.vmap(
@@ -238,9 +242,12 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
             # Zero dec_in → all agents get uniform attention → identical decoder
             # output → no type specialisation.  Learnable slot_queries break the
             # symmetry from step 1 while preserving ratio = 1.0 (obs-independent).
+            # stddev=0.02 (Perceiver/Q-Former convention): queries small relative
+            # to LayerNorm'd encoder output, lets the content drive attention once
+            # the encoder starts producing useful features.
             slot_queries = self.param(
                 "slot_queries",
-                nn.initializers.normal(stddev=1.0),
+                nn.initializers.normal(stddev=0.02),
                 (n, self.hidden_dim),
             )
             dec_in = jnp.broadcast_to(

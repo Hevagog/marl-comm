@@ -61,19 +61,21 @@ CONFIG = {
     },
 
     # ---- CommFormer-specific PPO parameters ----
+    # Paper-faithful MuJoCo-style hyperparameters (CommFormer follows MAT's
+    # Table 8: Wen et al. 2022 NeurIPS).  Previous run (onhblyxs, hidden=256,
+    # blocks=2, heads=4, clip=0.2, LR=3e-4) plateaued at -12.6 with
+    # ratio_max_abs_dev growing to 17.5 — classic transformer-in-RL
+    # trust-region violation.  Downsizing to paper HP tightens the update.
     "commformer": {
         "rollouts":        4096,
-        # v2: reduced epochs 5→3, increased mini_batches 2→4.
-        # 3 epochs × 4 mini-batches = 12 gradient steps (same compute as 5×2=10 but
-        # more data coverage per epoch).  Fewer sequential steps on the same data
-        # reduces ratio drift vs v1 which had ratio_max_abs_dev growing to 5+ by 350k.
-        "learning_epochs": 10,
-        "mini_batches":    2,
+        "learning_epochs": 10,       # Paper MuJoCo: 10
+        "mini_batches":    4,        # Paper MuJoCo: 40; ours honours
+                                     # buffer_size % num_agents invariant.
 
         "discount_factor": 0.99,
         "lambda":          0.95,
 
-        "learning_rate":                  3e-4,
+        "learning_rate":                  5e-5,  # Paper MuJoCo: 5e-5 (was 3e-4, 6× too high).
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
@@ -98,7 +100,8 @@ CONFIG = {
         "learning_starts":  0,
 
         "grad_norm_clip":         0.5,
-        "ratio_clip":             0.2,
+        "ratio_clip":             0.05,  # Paper: 0.05 (was 0.2).  Tight trust region
+                                         # required for transformer-in-RL stability.
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
@@ -133,17 +136,15 @@ CONFIG = {
         # all-one, which would make communication trivially sparse or dense.
         "comm_reg_scale":     0.001,
 
-        # ---- CommFormer architecture hyperparameters ----
-        # Larger capacity for 4-agent heterogeneous warehouse task.
+        # Paper-MuJoCo architecture: hidden=64, 1 block, 1 head, head_dim=64.
+        # Previous 256/2/4/64/256 oversized by 4× — amplified ratio drift
+        # across deeper non-linearities per update step (onhblyxs ratio_mad → 17.5).
         # sparsity=0.5 → k=2 for N=4: each agent attends to 2 others.
-        # v2: upsized from 128→256 hidden / 256→512 mlp after observing no learning
-        # in v1.  v11: keeping 256 — the architecture was correct, the training
-        # schedule was wrong (missing entropy annealing + LR decay).
-        "hidden_dim":  256,
-        "num_blocks":  2,
-        "num_heads":   4,
+        "hidden_dim":  64,
+        "num_blocks":  1,
+        "num_heads":   1,
         "head_dim":    64,
-        "mlp_dim":     256,
+        "mlp_dim":     128,
         "sparsity":    0.5,
     },
 
@@ -152,7 +153,7 @@ CONFIG = {
     },
 
     "value": {
-        "hidden_sizes": [256, 128],
+        "hidden_sizes": [128, 64],
     },
 
     "memory": {

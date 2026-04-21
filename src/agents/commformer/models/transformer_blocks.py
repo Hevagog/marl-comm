@@ -16,6 +16,12 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
+# GTrXL init (Parisotto et al. 2020, §3.4): near-zero init on residual output
+# projections (Wo in MHA, mlp2 in FFN) so each transformer sublayer acts as
+# near-identity at initialization.  Critical for transformer stability in RL.
+_HIDDEN_GAIN = jnp.sqrt(2.0)  # ReLU-compatible gain for hidden layers
+_OUTPUT_GAIN = 0.01           # Near-zero gain for sublayer output projections
+
 
 class EdgeEmbedding(nn.Module):
     """Produces edge embeddings r_{i→j} from the adjacency matrix α.
@@ -132,8 +138,13 @@ class RelationEnhancedMHA(nn.Module):
         # Concatenate heads
         out = out.reshape(n, d)
 
-        # Output projection
-        out = nn.Dense(query.shape[-1], name="Wo")(out)
+        # Output projection — GTrXL init (Parisotto 2020): near-zero scale
+        # so the MHA sublayer is near-identity at initialization.
+        out = nn.Dense(
+            query.shape[-1],
+            kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+            name="Wo",
+        )(out)
         return out
 
 
@@ -162,12 +173,21 @@ class EncoderBlock(nn.Module):
         )(x, x, x, adj, edge_emb)
         x = x + residual
 
-        # MLP
+        # MLP — hidden Dense uses ReLU gain; output Dense uses GTrXL near-zero
+        # so the FFN sublayer is near-identity at init.
         residual = x
         x = nn.LayerNorm(name="ln2")(x)
-        x = nn.Dense(self.mlp_dim, name="mlp1")(x)
+        x = nn.Dense(
+            self.mlp_dim,
+            kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+            name="mlp1",
+        )(x)
         x = nn.relu(x)
-        x = nn.Dense(residual.shape[-1], name="mlp2")(x)
+        x = nn.Dense(
+            residual.shape[-1],
+            kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+            name="mlp2",
+        )(x)
         x = x + residual
 
         return x
@@ -214,12 +234,20 @@ class DecoderBlock(nn.Module):
         )(x, enc_out, enc_out, adj, edge_emb)
         x = x + residual
 
-        # MLP
+        # MLP — GTrXL init on output projection for sublayer near-identity.
         residual = x
         x = nn.LayerNorm(name="ln3")(x)
-        x = nn.Dense(self.mlp_dim, name="mlp1")(x)
+        x = nn.Dense(
+            self.mlp_dim,
+            kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+            name="mlp1",
+        )(x)
         x = nn.relu(x)
-        x = nn.Dense(residual.shape[-1], name="mlp2")(x)
+        x = nn.Dense(
+            residual.shape[-1],
+            kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
+            name="mlp2",
+        )(x)
         x = x + residual
 
         return x

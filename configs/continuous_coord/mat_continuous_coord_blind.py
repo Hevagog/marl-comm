@@ -65,14 +65,23 @@ CONFIG = {
     },
 
     "mat": {
+        # Paper-faithful MuJoCo-style hyperparameters (Wen et al. 2022, Table 8).
+        # Our continuous_coord_blind env is MuJoCo-analog: dense rewards, continuous
+        # coordination, N=4 agents — so MuJoCo settings are the right baseline.
+        #
+        # Previous run (3ywolh5j, 2× hidden, 4× heads, clip=0.2, LR=3e-4) plateaued
+        # at -12.5 with ratio_mad growing to 4.1 by 500k.  The trust-region violations
+        # correlate with the oversized update per step.  Paper HP: clip=0.05, LR=5e-5,
+        # smaller network — tighter trust region → ratio_mad should stay <0.5.
         "rollouts":        4096,
-        "learning_epochs": 5,
-        "mini_batches":    4,
+        "learning_epochs": 10,       # Paper MuJoCo: 10
+        "mini_batches":    4,        # Paper MuJoCo: 40; ours is smaller but honours
+                                     # buffer_size % num_agents == 0 invariant.
 
         "discount_factor": 0.99,
         "lambda":          0.95,
 
-        "learning_rate":                  3e-4,
+        "learning_rate":                  5e-5,  # Paper MuJoCo: 5e-5 (was 3e-4, 6× too high).
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
@@ -92,7 +101,8 @@ CONFIG = {
         "learning_starts":  0,
 
         "grad_norm_clip":         0.5,
-        "ratio_clip":             0.2,
+        "ratio_clip":             0.05,  # Paper: 0.05 (was 0.2).  Tight trust region
+                                         # required for transformer-in-RL stability.
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
@@ -113,11 +123,14 @@ CONFIG = {
 
         "weight_decay":       1e-4,
 
-        "hidden_dim":  128,
-        "num_blocks":  2,
-        "num_heads":   4,
-        "head_dim":    32,
-        "mlp_dim":     256,
+        # Paper-MuJoCo architecture: hidden=64, 1 block, 1 head, head_dim=64.
+        # Our previous 128/2/4/32 oversized by ~4-8×, amplifying ratio drift
+        # across the deeper non-linearities each update step.
+        "hidden_dim":  64,
+        "num_blocks":  1,
+        "num_heads":   1,
+        "head_dim":    64,
+        "mlp_dim":     128,
     },
 
     "policy": {
