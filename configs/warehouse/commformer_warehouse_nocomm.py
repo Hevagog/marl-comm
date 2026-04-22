@@ -120,6 +120,11 @@ CONFIG = {
         "discount_factor": 0.99,
         "lambda":          0.95,
 
+        # LR=3e-4 confirmed by c52g7m0z/tpgbpxwn/8g5sw7au: all reach 150+
+        # by 200-275k.  My earlier 1e-4 "fix" (prcnkpyq) reached only +3 at
+        # 275k — killing learning by over-constraining early exploration.
+        # Root cause of ratio blowup was KL stop using MEAN KL (diluted by
+        # 95% of transitions at ratio≈1), fixed by ratio_max_threshold below.
         "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
@@ -131,8 +136,10 @@ CONFIG = {
         # obs_dim = 190 unchanged (same slots, zeroed where internal state was)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -153,15 +160,25 @@ CONFIG = {
         "value_loss_scale":   1.0,
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
+        # ratio_max_threshold: stop epoch loop when any mini-batch's
+        # ratio_max_abs_dev exceeds this.  Catches per-transition drift
+        # that mean-KL misses (c52g7m0z hit ratio_mad=14 with mean KL<0.05).
+        # 2.0 allows ratio ∈ [0, 3.0] per step, preventing catastrophic
+        # forgetting while preserving the large early-phase policy jumps
+        # that drive the -30 → +150 transition.
+        "ratio_max_threshold":  2.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
         "time_limit_bootstrap": True,
         "weight_decay":       1e-4,
         "comm_reg_scale":     0.001,
 
-        "hidden_dim":  256,
+        # Matches continuous_coord middle ground: 128 hidden × 2 blocks ≈
+        # MAPPO's [128, 64] MLP capacity via transformer attention.
+        # Previous 256/2/4/64/256 combined with clip=0.2 blew ratio_mad to 10.
+        "hidden_dim":  128,
         "num_blocks":  2,
-        "num_heads":   4,
+        "num_heads":   1,
         "head_dim":    64,
         "mlp_dim":     256,
         "sparsity":    0.5,
@@ -172,7 +189,7 @@ CONFIG = {
     },
 
     "value": {
-        "hidden_sizes": [256, 128],
+        "hidden_sizes": [128, 64],
     },
 
     "memory": {

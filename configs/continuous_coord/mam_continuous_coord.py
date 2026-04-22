@@ -77,8 +77,10 @@ CONFIG = {
 
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 30},
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 28},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -104,7 +106,7 @@ CONFIG = {
         "n_embd":      128,
         "n_block":     1,
         "d_state":     32,
-        "d_conv":      4,
+        "d_conv":      1,
         "delta_rank":  16,
     },
 

@@ -7,8 +7,10 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler
 # Architecture: Multi-Agent Transformer (Wen et al. 2022, NeurIPS).
 # Standard scaled dot-product self-attention over N agent observations —
 # no CommGraph, no α, no k-hot STE.  GTrXL init on Wo/mlp2 projections
-# (Parisotto et al. 2020) for stable early training.  Parallel decoder
-# with zero start tokens: ratio = 1.0 at every PPO update start.
+# (Parisotto et al. 2020) for stable early training.  The repo now uses
+# a paper-faithful autoregressive decoder at rollout / teacher forcing in
+# update, so PPO stability relies on matched action conditioning instead of
+# the old parallel-decoder ratio=1.0 shortcut.
 #
 # Hyperparameter rationale vs. CommFormer v13
 # -------------------------------------------
@@ -125,6 +127,8 @@ CONFIG = {
         "discount_factor": 0.99,
         "lambda":          0.95,
 
+        # 3e-4 matches CommFormer warehouse (dense reward env that needs
+        # large early jumps).  ratio_max_threshold below caps per-step drift.
         "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
@@ -136,10 +140,12 @@ CONFIG = {
         # obs_dim = 7+8+(5*5*6)+(3*6)+3+1+3 = 190 (vision=2, max_agents=4)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
+        "update_state_preprocessor_in_update": False,
         # state_dim = 12*16*6 + 4*8 = 1184; +4 one-hot = 1188
         # WH-B02 note: runtime _sync_preprocessor_sizes corrects to 1184 if needed.
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -162,10 +168,11 @@ CONFIG = {
 
         "value_loss_scale":   1.0,
 
-        # MAT parallel decoder gives ratio = 1.0 at update start, so 0.05
-        # matches MAPPO and allows 2-3 full epochs before ratio drifts.
+        # With the paper-faithful AR decoder restored, KL=0.05 matches MAPPO
+        # and bounds update drift without relying on the old parallel shortcut.
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
+        "ratio_max_threshold":  2.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
 
@@ -174,14 +181,16 @@ CONFIG = {
         "weight_decay":       1e-4,
 
         # ---- MAT architecture hyperparameters ----
-        # hidden_dim=256 matches CommFormer.  mlp_dim=512 is 2× hidden_dim,
-        # following standard Transformer FFN ratio (Vaswani et al. 2017 §3.3).
+        # Middle-ground architecture: 128 × 2 blocks × 1 head ≈ MAPPO's
+        # [128, 64] MLP capacity via transformer attention.  Previous
+        # 256/2/4/64/512 combined with clip=0.2 amplified ratio drift
+        # (same pattern as continuous_coord_blind 3ywolh5j run hit 4.1).
         # sparsity absent: MAT has full N×N attention, no CommGraph.
-        "hidden_dim":  256,
+        "hidden_dim":  128,
         "num_blocks":  2,
-        "num_heads":   4,
+        "num_heads":   1,
         "head_dim":    64,
-        "mlp_dim":     512,
+        "mlp_dim":     256,
     },
 
     "policy": {
@@ -189,7 +198,7 @@ CONFIG = {
     },
 
     "value": {
-        "hidden_sizes": [256, 128],
+        "hidden_sizes": [128, 64],
     },
 
     "memory": {

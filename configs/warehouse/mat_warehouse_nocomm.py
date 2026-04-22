@@ -130,8 +130,10 @@ CONFIG = {
         # obs_dim = 190 unchanged (same slots, zeroed where internal state was)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -152,16 +154,18 @@ CONFIG = {
         "value_loss_scale":   1.0,
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
+        "ratio_max_threshold":  2.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
         "time_limit_bootstrap": True,
         "weight_decay":       1e-4,
 
-        "hidden_dim":  256,
+        # Middle-ground architecture matching mat_warehouse.py.
+        "hidden_dim":  128,
         "num_blocks":  2,
-        "num_heads":   4,
+        "num_heads":   1,
         "head_dim":    64,
-        "mlp_dim":     512,
+        "mlp_dim":     256,
     },
 
     "policy": {
@@ -169,7 +173,7 @@ CONFIG = {
     },
 
     "value": {
-        "hidden_sizes": [256, 128],
+        "hidden_sizes": [128, 64],
     },
 
     "memory": {

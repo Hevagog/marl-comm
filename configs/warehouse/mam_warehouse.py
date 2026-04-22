@@ -110,9 +110,11 @@ CONFIG = {
         "min_lr_fraction":          0.1,
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 190},
+        "state_preprocessor_kwargs":         {"size": 262},   # 24x32 grid, 16 agents, vision_range=2 → verified via env
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 1184},
+        "shared_state_preprocessor_kwargs":  {"size": 4736},  # 24*32*6 + 16*8 + 16 one-hot → verified via env
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -143,7 +145,7 @@ CONFIG = {
         "n_block":     1,      # one Encoder + one Decoder block (paper default)
 
         "d_state":     64,     # scaled from 32: 2× for 4× more agents; maintains SSM memory across 16-step AR chain
-        "d_conv":      4,      # 1D convolution kernel size (paper Table 4; sequence-length-independent)
+        "d_conv":      1,      # Use causal-safe conv width 1 so parallel teacher forcing matches AR rollout.
         "delta_rank":  64,     # scaled from 16: match d_state order of magnitude for richer input-dependent transitions
     },
 

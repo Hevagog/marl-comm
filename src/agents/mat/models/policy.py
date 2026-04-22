@@ -1,28 +1,16 @@
 """Multi-Agent Transformer (MAT) policy network.
 
-Paper-faithful implementation of Wen et al. 2022 "Multi-Agent Transformer"
-(NeurIPS 2022), with one deliberate deviation: the AR decoder is replaced by
-a parallel decoder with zero start tokens (same fix applied to CommFormer v13).
-
-Why the deviation is justified
---------------------------------
-1. **No execution benefit** (MAT §4.2): Decentralized agents cannot observe
-   teammates' actions at deployment time.  The AR dependency is an artifact
-   of training, not a decentralized capability.
-2. **Ratio mismatch**: Teacher-forcing at training vs. AR sampling at rollout
-   produces systematic ratio_max_abs_dev > 0.5 before any gradient step
-   (Bengio et al. 2015 "Scheduled Sampling").  Parallel decoder gives ratio = 1.0
-   at update start, allowing all learning_epochs × mini_batches steps.
-3. **Compute**: AR scan calls enc_dec_block N times per rollout step; parallel
-   decoder calls it once — 4× faster for N=4.
+This implementation follows the paper's core encoder-decoder structure:
+the decoder is action-conditioned during training and autoregressive during
+rollout, so agent ``i`` conditions on the shifted prefix ``a_{<i}``.
 
 Architecture (MAT §3.2, Fig. 2)
----------------------------------
+--------------------------------
 1. Node embedding: obs → hidden_dim  (orthogonal init, gain = sqrt(2) for ReLU)
 2. Encoder: N stacked MATEncoderBlocks (standard scaled dot-product self-attention,
    full N×N connectivity, no communication graph / no α parameter)
 3. Decoder: N stacked MATDecoderBlocks
-   - Causal masked self-attention over zero dec_in
+   - Causal masked self-attention over shifted previous actions
    - Cross-attention to encoder output
 4. Action head: tanh + Dense → logits
 
@@ -39,7 +27,8 @@ Key correctness properties
 - No CommGraph, no α, no k-hot STE — eliminates gradient bias (Paulus et al. 2020).
 - assert b % n == 0 before reshaping (fix for CC-B01 from memory/bugs.md).
 - No unused heads or value estimates (fix for MAM-B02).
-- Parallel decoder: identical forward path at rollout and training → ratio = 1.0.
+- Teacher-forced update path and autoregressive rollout path both consume
+  shifted action prefixes, restoring paper-faithful action conditioning.
 
 References
 ----------
@@ -255,7 +244,7 @@ class MATDecoderBlock(nn.Module):
 
 
 class _EncoderDecoderBlock(nn.Module):
-    """Encoder-Decoder pipeline for a single agent group, usable with nn.vmap."""
+    """Legacy encoder-decoder pipeline kept for diagnostics and old tests."""
 
     num_blocks: int
     num_heads: int
@@ -291,22 +280,55 @@ class _EncoderDecoderBlock(nn.Module):
         return dec  # (N, hidden_dim)
 
 
+class _EncoderStack(nn.Module):
+    """Encoder stack for one agent group."""
+
+    num_blocks: int
+    num_heads: int
+    head_dim: int
+    mlp_dim: int
+
+    @nn.compact
+    def __call__(self, x_group: jax.Array) -> jax.Array:
+        enc = x_group
+        for blk in range(self.num_blocks):
+            enc = MATEncoderBlock(
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                mlp_dim=self.mlp_dim,
+                name=f"enc_block_{blk}",
+            )(enc)
+        return enc
+
+
+class _DecoderStack(nn.Module):
+    """Decoder stack for one agent group."""
+
+    num_blocks: int
+    num_heads: int
+    head_dim: int
+    mlp_dim: int
+
+    @nn.compact
+    def __call__(self, dec_in: jax.Array, enc_out: jax.Array) -> jax.Array:
+        dec = dec_in
+        for blk in range(self.num_blocks):
+            dec = MATDecoderBlock(
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                mlp_dim=self.mlp_dim,
+                name=f"dec_block_{blk}",
+            )(dec, enc_out)
+        return dec
+
+
 # ---------------------------------------------------------------------------
 # MAT Policy Network
 # ---------------------------------------------------------------------------
 
 
 class MATPolicyNet(CategoricalMixin, Model):
-    """Multi-Agent Transformer policy network.
-
-    Standard transformer encoder-decoder for MARL (Wen et al. 2022).
-    Key differences from CommFormer:
-    - No CommGraph (no α, no k-hot STE) — attention weights are the comm.
-    - No EdgeEmbedding — standard scaled dot-product attention.
-    - GTrXL init on output projections (Parisotto et al. 2020).
-    - Full N×N encoder attention; decoder cross-attends to all encoder outputs.
-    - Parallel decoder with zero start tokens (ratio = 1.0 at update start).
-    """
+    """Multi-Agent Transformer policy network."""
 
     hidden_dim: int = 256
     num_blocks: int = 2
@@ -345,8 +367,11 @@ class MATPolicyNet(CategoricalMixin, Model):
         role: str = "",
     ):
         x = inputs["states"]  # (B, obs_dim)
+        taken_actions = inputs.get("taken_actions", None)
+        ar_key = inputs.get("ar_key", None)
         n = self.num_agents
         b = x.shape[0]
+        act_dim = int(self.num_actions)
 
         # Node embedding
         x_emb = nn.Dense(
@@ -354,6 +379,19 @@ class MATPolicyNet(CategoricalMixin, Model):
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
             name="node_embed",
         )(x)  # (B, hidden_dim)
+
+        action_encoder = nn.Sequential(
+            [
+                nn.Dense(
+                    self.hidden_dim,
+                    use_bias=False,
+                    kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                    name="action_embed",
+                ),
+                nn.gelu,
+                nn.LayerNorm(name="action_embed_ln"),
+            ]
+        )
 
         # Action head layers (defined once, reused in both paths)
         action_fc = nn.Dense(
@@ -376,52 +414,68 @@ class MATPolicyNet(CategoricalMixin, Model):
             groups = b // n
             x_grouped = x_emb.reshape(groups, n, self.hidden_dim)
 
-            # Vectorize encoder-decoder over groups (shared params)
-            VmappedEncDec = nn.vmap(
-                _EncoderDecoderBlock,
+            VmappedEncoder = nn.vmap(
+                _EncoderStack,
+                variable_axes={"params": None},
+                split_rngs={"params": False},
+                in_axes=0,
+                out_axes=0,
+            )
+            encoder_stack = VmappedEncoder(
+                num_blocks=self.num_blocks,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                mlp_dim=self.mlp_dim,
+                name="encoder_stack",
+            )
+            enc_out = encoder_stack(x_grouped)
+
+            VmappedDecoder = nn.vmap(
+                _DecoderStack,
                 variable_axes={"params": None},
                 split_rngs={"params": False},
                 in_axes=(0, 0),
                 out_axes=0,
             )
-            enc_dec_block = VmappedEncDec(
+            decoder_stack = VmappedDecoder(
                 num_blocks=self.num_blocks,
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
                 mlp_dim=self.mlp_dim,
-                name="enc_dec_block",
+                name="decoder_stack",
             )
 
-            # Per-agent slot queries as decoder start tokens.
-            #
-            # Zero start tokens cause all N agents to receive identical decoder
-            # output at initialisation: with dec_in=0, LayerNorm(0)=0, all
-            # cross-attention queries are zero → uniform attention over encoder
-            # → mean(enc_out) for every position → all agents get the same
-            # logits.  In the typed blind-coordination task ([0,0,1,1] types)
-            # this means agents cannot specialise by type from day 1.
-            #
-            # Learnable slot_queries (one per agent slot, init normal σ=1.0):
-            #   • Different per position → distinct decoder outputs immediately
-            #   • Obs-independent → ratio = 1.0 invariant is preserved
-            #   • Learned specialisation replaces AR action conditioning
-            # stddev=0.02 (Perceiver/Q-Former convention) — keeps queries small
-            # relative to LayerNorm'd encoder output (std ≈ 1) at init.  This breaks
-            # the all-agents-identical symmetry without dominating the attention
-            # distribution from step 1.  Previous stddev=1.0 biased attention toward
-            # query content before any useful encoder features exist.
-            slot_queries = self.param(
-                "slot_queries",
-                nn.initializers.normal(stddev=0.02),
-                (n, self.hidden_dim),
-            )  # (N, hidden_dim) — broadcast over groups
-            dec_in = jnp.broadcast_to(
-                slot_queries[None, :, :], (groups, n, self.hidden_dim)
-            )
-            decoded = enc_dec_block(x_grouped, dec_in)
-            h = decoded.reshape(b, self.hidden_dim)
-
-            extra_outputs: dict = {"encoder_out": h}
+            if taken_actions is not None:
+                actions_int = taken_actions.reshape(b).astype(jnp.int32)
+                one_hot = jax.nn.one_hot(actions_int, act_dim)
+                grouped_actions = one_hot.reshape(groups, n, act_dim)
+                shifted = jnp.zeros((groups, n, act_dim + 1), dtype=x_emb.dtype)
+                shifted = shifted.at[:, 0, 0].set(1.0)
+                shifted = shifted.at[:, 1:, 1:].set(grouped_actions[:, :-1, :])
+                dec_in = action_encoder(shifted)
+                decoded = decoder_stack(dec_in, enc_out)
+                h = decoded.reshape(b, self.hidden_dim)
+                extra_outputs: dict[str, Any] = {
+                    "encoder_out": enc_out.reshape(b, self.hidden_dim)
+                }
+            elif ar_key is not None:
+                return self._autoregressive_decode(
+                    action_encoder,
+                    decoder_stack,
+                    _action_head,
+                    enc_out,
+                    ar_key,
+                    groups,
+                    n,
+                    act_dim,
+                )
+            else:
+                shifted = jnp.zeros((groups, n, act_dim + 1), dtype=x_emb.dtype)
+                shifted = shifted.at[:, 0, 0].set(1.0)
+                dec_in = action_encoder(shifted)
+                decoded = decoder_stack(dec_in, enc_out)
+                h = decoded.reshape(b, self.hidden_dim)
+                extra_outputs = {"encoder_out": enc_out.reshape(b, self.hidden_dim)}
         else:
             # Fallback MLP when batch size is not a multiple of N.
             # This path is reached during single-agent evaluation or
@@ -438,15 +492,61 @@ class MATPolicyNet(CategoricalMixin, Model):
         logits = _action_head(h)
         return logits, extra_outputs
 
+    def _autoregressive_decode(
+        self,
+        action_encoder,
+        decoder_stack,
+        action_head,
+        enc_out: jax.Array,
+        key: jax.Array,
+        groups: int,
+        n: int,
+        act_dim: int,
+    ):
+        """Autoregressive decode matching the paper's shifted-action scheme."""
+        shifted = jnp.zeros((groups, n, act_dim + 1), dtype=enc_out.dtype)
+        shifted = shifted.at[:, 0, 0].set(1.0)
+
+        output_actions = jnp.zeros((groups, n), dtype=jnp.int32)
+        output_log_probs = jnp.zeros((groups, n), dtype=enc_out.dtype)
+
+        for i in range(n):
+            dec_in = action_encoder(shifted)
+            decoded = decoder_stack(dec_in, enc_out)
+            logits_i = action_head(decoded[:, i, :])
+
+            key, subkey = jax.random.split(key)
+            action_i = jax.random.categorical(subkey, logits_i)
+            log_probs_i = jax.nn.log_softmax(logits_i)
+            log_prob_i = jnp.take_along_axis(
+                log_probs_i, action_i[:, None], axis=-1
+            ).squeeze(-1)
+
+            output_actions = output_actions.at[:, i].set(action_i)
+            output_log_probs = output_log_probs.at[:, i].set(log_prob_i)
+
+            if i + 1 < n:
+                shifted = shifted.at[:, i + 1, 1:].set(jax.nn.one_hot(action_i, act_dim))
+
+        actions_flat = output_actions.T.reshape(-1)[:, None]
+        log_probs_flat = output_log_probs.T.reshape(-1)[:, None]
+        return actions_flat, {
+            "log_probs": log_probs_flat,
+            "autoregressive": True,
+        }
+
     def init_state_dict(self, role: str, inputs=None, key=None) -> None:
-        """Ensure batch size = num_agents so enc/dec params are initialized."""
+        """Ensure batch size = num_agents so encoder/decoder params init."""
         if inputs is None:
             obs_sample = self.observation_space.sample()
             obs_batch = jnp.tile(
                 jnp.asarray(obs_sample, dtype=jnp.float32)[None, :],
                 (self.num_agents, 1),
             )
-            inputs = {"states": obs_batch}
+            inputs = {
+                "states": obs_batch,
+                "taken_actions": jnp.zeros((self.num_agents, 1), dtype=jnp.int32),
+            }
         super().init_state_dict(role, inputs, key)
 
     def act(
@@ -455,6 +555,16 @@ class MATPolicyNet(CategoricalMixin, Model):
         role: str = "",
         params: jax.Array | None = None,
     ) -> tuple[jax.Array, (jax.Array | None), Mapping[str, (jax.Array | Any)]]:
+        if "ar_key" in inputs:
+            with jax.default_device(self.device):
+                p = self.state_dict.params if params is None else params
+                net_output, extra = self.apply(p, inputs, role)
+                actions = net_output
+                log_probs = extra["log_probs"]
+                outputs = {"net_output": net_output}
+                outputs.update(extra)
+                return actions, log_probs, outputs
+
         inputs = dict(inputs)
         actions, log_prob, outputs = super().act(inputs, role, params)
         outputs["stddev"] = outputs["net_output"]

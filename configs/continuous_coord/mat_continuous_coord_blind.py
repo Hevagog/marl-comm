@@ -11,7 +11,7 @@ from skrl.resources.preprocessors.jax import RunningStandardScaler
 # This is the regime where communication architectures should beat MAPPO.
 CONFIG = {
     "experiment": {
-        "name":             "mat_continuous_coord_blind_v1",
+        "name":             "mat_continuous_coord_blind_v2",
         "agent_type":       "mat",
         "directory":        "runs",
         "wandb":            True,
@@ -81,7 +81,10 @@ CONFIG = {
         "discount_factor": 0.99,
         "lambda":          0.95,
 
-        "learning_rate":                  5e-5,  # Paper MuJoCo: 5e-5 (was 3e-4, 6× too high).
+        "learning_rate":                  1e-4,  # Middle ground: hw1xsb8s at 5e-5 fixed trust region
+                                                 # (ratio_mad 4.1→0.5) but plateaued at -12.4 from 200k
+                                                 # onward.  2× bump keeps trust region stable
+                                                 # (clipped_frac was ~2.5% — far below 0.3 ceiling).
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
@@ -92,8 +95,10 @@ CONFIG = {
         # obs_dim = 44 (slots zero when outside range — same preprocessor size)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 44},
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 46},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -123,14 +128,17 @@ CONFIG = {
 
         "weight_decay":       1e-4,
 
-        # Paper-MuJoCo architecture: hidden=64, 1 block, 1 head, head_dim=64.
-        # Our previous 128/2/4/32 oversized by ~4-8×, amplifying ratio drift
-        # across the deeper non-linearities each update step.
-        "hidden_dim":  64,
-        "num_blocks":  1,
+        # Middle-ground architecture: 128 hidden × 2 blocks matches MAPPO's
+        # [128, 64] MLP capacity but via transformer attention.  Paper-MuJoCo
+        # 64/1/1 (hw1xsb8s run) stabilised ratio but under-capacity for the
+        # blind-typed coord — plateaued at -12.4 (MAPPO crosses 0 by 500k).
+        # Keeping head_dim=64 and heads=1 — extra heads add ratio drift
+        # without representational gain at this obs scale.
+        "hidden_dim":  128,
+        "num_blocks":  2,
         "num_heads":   1,
         "head_dim":    64,
-        "mlp_dim":     128,
+        "mlp_dim":     256,
     },
 
     "policy": {

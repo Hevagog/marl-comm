@@ -671,13 +671,20 @@ class CategoricalMAPPO(MAPPO):
                 tensors[name] = t.reshape(-1, t.shape[-1])
             # Preprocess states per-agent (each has its own scaler with correct size)
             # train=True only on first call to update running stats once
+            update_state_preproc = bool(
+                self.cfg.get("update_state_preprocessor_in_update", False)
+            )
+            update_shared_state_preproc = bool(
+                self.cfg.get("update_shared_state_preprocessor_in_update", False)
+            )
             tensors["states"] = self._state_preprocessor[uid](
-                tensors["states"], train=True
+                tensors["states"], train=update_state_preproc
             )
 
             tensors["shared_states"] = self._append_agent_id(
                 self._shared_state_preprocessor[uid](
-                    tensors["shared_states"], train=(uid == uid0)
+                    tensors["shared_states"],
+                    train=(uid == uid0) and update_shared_state_preproc,
                 ),
                 self._agent_onehot[uid],
             )

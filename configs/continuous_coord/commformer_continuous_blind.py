@@ -90,9 +90,11 @@ CONFIG = {
         # obs_dim = 6 + T + (n-1)*(4+T) + mt*(4+T) = 6+2+3*6+3*6 = 44 (n=4,T=2,mt=3)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 44},
+        "update_state_preprocessor_in_update": False,
         # state_dim = n*(4+T) + mt*(4+T) = 4*6+3*6 = 42; expanded with 4-agent one-hot = 46
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 46},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 

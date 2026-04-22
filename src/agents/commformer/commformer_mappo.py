@@ -90,10 +90,12 @@ class CommFormerMAPPO(CategoricalMAPPO):
             -1, preprocessed[0].shape[-1]
         )
 
-        # Parallel decoder: no AR key needed.  Same zero-dec_in forward path
-        # is used at rollout and training — ratio = 1.0 at update start.
+        with jax.default_device(policy.device):
+            policy._c_i += 1  # type: ignore[attr-defined]
+            graph_key = jax.random.fold_in(policy._c_key, policy._c_i)  # type: ignore[attr-defined]
+
         actions_all, log_prob_all, outputs_all = policy.act(
-            {"states": stacked_obs},
+            {"states": stacked_obs, "key": graph_key},
             role="policy",
         )
         assert log_prob_all is not None, "log_prob_all should not be None"

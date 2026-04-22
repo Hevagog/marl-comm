@@ -108,6 +108,9 @@ CONFIG = {
         "discount_factor": 0.99,
         "lambda":          0.95,
 
+        # LR=3e-4 confirmed by warehouse nocomm runs (reach 150+ at 200-275k).
+        # 1e-4 killed learning (prcnkpyq: only +3 at 275k).  ratio_mad blowup
+        # is now addressed by ratio_max_threshold below, not by cutting LR.
         "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
@@ -123,9 +126,11 @@ CONFIG = {
         # obs_dim = 7+8+(5*5*6)+(3*6)+3+1+3 = 190 (vision=2, max_agents=4)
         "state_preprocessor":                RunningStandardScaler,
         "state_preprocessor_kwargs":         {"size": 190},
+        "update_state_preprocessor_in_update": False,
         # state_dim = 12*16*6 + 4*8 = 1184; expanded with 4-agent one-hot = 1188
         "shared_state_preprocessor":         RunningStandardScaler,
         "shared_state_preprocessor_kwargs":  {"size": 1188},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -158,6 +163,7 @@ CONFIG = {
         # per rollout before the policy has drifted too far.
         "kl_threshold":       0.05,
         "kl_warmup_fraction": 0.0,
+        "ratio_max_threshold":  2.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
 
@@ -171,15 +177,13 @@ CONFIG = {
         # all-one, which would make communication trivially sparse or dense.
         "comm_reg_scale":     0.001,
 
-        # ---- CommFormer architecture hyperparameters ----
-        # Larger capacity for 4-agent heterogeneous warehouse task.
+        # Middle-ground architecture: 128 × 2 blocks × 1 head ≈ MAPPO's
+        # [128, 64] MLP capacity via transformer attention.  Previous
+        # 256/2/4/64/256 at clip=0.2 pushed ratio_mad into the 10+ regime.
         # sparsity=0.5 → k=2 for N=4: each agent attends to 2 others.
-        # v2: upsized from 128→256 hidden / 256→512 mlp after observing no learning
-        # in v1.  v11: keeping 256 — the architecture was correct, the training
-        # schedule was wrong (missing entropy annealing + LR decay).
-        "hidden_dim":  256,
+        "hidden_dim":  128,
         "num_blocks":  2,
-        "num_heads":   4,
+        "num_heads":   1,
         "head_dim":    64,
         "mlp_dim":     256,
         "sparsity":    0.5,
@@ -190,7 +194,7 @@ CONFIG = {
     },
 
     "value": {
-        "hidden_sizes": [256, 128],
+        "hidden_sizes": [128, 64],
     },
 
     "memory": {

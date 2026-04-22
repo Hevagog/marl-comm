@@ -1,19 +1,17 @@
 """MAT-enhanced MAPPO agent.
 
-Thin subclass of CommFormerMAPPO that reuses the same group-batched act()
-and interleaved-buffer shuffle logic.  MAT shares the same CTDE batching
-requirements: all N agents' observations must be grouped together so the
-transformer encoder-decoder sees a complete agent group.
-
-The only behavioral difference from CommFormerMAPPO is that MATPolicyNet
-does not produce ``adj_matrices`` in its output dict (no comm graph), so
-the graph-key special-casing in CommFormerMAPPO is silently irrelevant.
-All other output keys (``encoder_out``, ``stddev``, ``net_output``) are
-handled identically by the parent's output-splitting loop.
+MAT keeps CommFormer's env-major grouping and timestep-preserving shuffle,
+but its rollout path is now explicitly autoregressive. That distinction is
+important: unlike CommFormer, MAT must pass an ``ar_key`` so the policy
+samples actions sequentially in paper order.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from agents.commformer.commformer_mappo import CommFormerMAPPO
@@ -27,6 +25,62 @@ class MATAgent(CommFormerMAPPO):
     A buffer size that is not a multiple of N would silently truncate samples
     and produce incomplete agent groups in the mini-batch.
     """
+
+    def act(
+        self,
+        states,
+        timestep: int,
+        timesteps: int,
+    ) -> tuple[
+        dict[str, jax.Array],
+        dict[str, jax.Array],
+        dict[str, dict[str, Any]],
+    ]:
+        """Autoregressive MAT rollout with env-major stacking and agent-major split."""
+        uid0 = self.possible_agents[0]
+        policy = self.policies[uid0]
+
+        preprocessed = [
+            self._state_preprocessor[uid](states[uid])
+            for uid in self.possible_agents
+        ]
+        stacked_obs = jnp.stack(preprocessed, axis=1).reshape(
+            -1, preprocessed[0].shape[-1]
+        )
+
+        with jax.default_device(policy.device):
+            policy._c_i += 1  # type: ignore[attr-defined]
+            ar_key = jax.random.fold_in(policy._c_key, policy._c_i)  # type: ignore[attr-defined]
+
+        actions_all, log_prob_all, outputs_all = policy.act(
+            {"states": stacked_obs, "ar_key": ar_key},
+            role="policy",
+        )
+        assert log_prob_all is not None, "log_prob_all should not be None in AR mode"
+
+        n = len(self.possible_agents)
+        num_envs = stacked_obs.shape[0] // n
+        actions: dict[str, jax.Array] = {}
+        log_prob: dict[str, jax.Array] = {}
+        outputs: dict[str, dict] = {}
+
+        for i, uid in enumerate(self.possible_agents):
+            s = slice(i * num_envs, (i + 1) * num_envs)
+            actions[uid] = actions_all[s]
+            log_prob[uid] = log_prob_all[s]
+            outputs[uid] = {}
+            for k, v in outputs_all.items():
+                if isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)) and v.ndim >= 1:
+                    outputs[uid][k] = v[s]
+                else:
+                    outputs[uid][k] = v
+
+        if not self._jax:
+            actions = {uid: jax.device_get(a) for uid, a in actions.items()}
+            log_prob = {uid: jax.device_get(lp) for uid, lp in log_prob.items()}
+
+        self._current_log_prob = log_prob
+        return actions, log_prob, outputs
 
     def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
         n = len(self.possible_agents)
