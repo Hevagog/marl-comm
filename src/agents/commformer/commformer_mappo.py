@@ -81,8 +81,7 @@ class CommFormerMAPPO(CategoricalMAPPO):
         # log-probs were computed under different data distributions →
         # ratio_max_abs_dev ≈ 1.8, ratio_clipped_frac ≈ 0.4, near-zero learning.
         preprocessed = [
-            self._state_preprocessor[uid](states[uid])
-            for uid in self.possible_agents
+            self._state_preprocessor[uid](states[uid]) for uid in self.possible_agents
         ]
         # preprocessed[i]: (num_envs, obs_dim)
         # stack → (num_envs, N, obs_dim), reshape → (N*num_envs, obs_dim)

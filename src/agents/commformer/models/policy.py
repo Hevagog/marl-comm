@@ -184,11 +184,6 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         x_emb = node_embed(x)  # (B, hidden_dim)
 
         comm_outputs: dict = {}
-        action_fc = nn.Dense(
-            self.hidden_dim,
-            kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
-            name="action_fc",
-        )
         action_logits_head = nn.Dense(
             int(self.num_actions),
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
@@ -196,8 +191,11 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
         )
 
         def _action_head(h: jax.Array) -> jax.Array:
-            h = action_fc(h)
-            h = nn.tanh(h)
+            # Direct projection: decoder output → logits.
+            # No intermediate tanh — the decoder already produces well-scaled
+            # representations via LayerNorm + MLP blocks, and adding tanh
+            # before logits creates a [-1,1] gradient bottleneck that weakens
+            # the policy gradient signal from the decoder.
             return action_logits_head(h)
 
         if b >= n and b % n == 0:

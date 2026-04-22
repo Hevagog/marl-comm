@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 CONFIG = {
     "experiment": {
-        "name":             "mam_warehouse_nocomm_v1",
+        "name":             "mam_warehouse_nocomm_v2",
         "agent_type":       "mam",
         "directory":        "runs",
         "wandb":            True,

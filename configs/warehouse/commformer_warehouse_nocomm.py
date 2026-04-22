@@ -2,27 +2,9 @@
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 
-# CommFormer on warehouse with no-communication observation (local vision only).
-#
-# no_comm=True in env section:
-#   - Other agents visible only within vision_range (not comm_range)
-#   - Visible: position (dx,dy), is_carrying (shelf on robot), is_stranded (stopped)
-#   - Hidden: battery, active flag (require radio to know)
-#   - No comm noise (local vision has no packet loss)
-#   - Obs dim stays 190 — same preprocessor size
-#
-# This is the UPPER BOUND for the no-comm communication benchmark:
-#   CommFormer attends over all agents' local embeddings via its learned
-#   communication graph (α), so it compensates for the missing radio obs
-#   by routing relevant local features through model-level attention.
-#   The α topology should converge to high-weight edges toward teammates
-#   carrying/stranded (inferred from physically-observable features).
-#
-# rescue_proximity=0.2 + agent_failure_prob=0.001: same rescue tuning
-#   as mappo_warehouse_nocomm — ensures rescue gradient exists for all agents.
 CONFIG = {
     "experiment": {
-        "name":             "commformer_warehouse_nocomm_v1",
+        "name":             "commformer_warehouse_nocomm_v4",
         "agent_type":       "commformer",
         "directory":        "runs",
         "wandb":            True,
@@ -112,25 +94,24 @@ CONFIG = {
         "fps":             10,
     },
 
+    # v3: Aligned with commformer_warehouse v13 training HPs.
+    # v2 used rollouts=256, epochs=10, mini_batches=2, entropy=0.05,
+    # kl_warmup=0.3, making it an invalid ablation — training dynamics
+    # were 10× different from the comm-enabled baseline.
     "commformer": {
-        "rollouts":        1024,
-        "learning_epochs": 3,
-        "mini_batches":    4,
+        "rollouts":        1024,  # v2: 256 → match v13
+        "learning_epochs": 3,    # v2: 10 → match v13
+        "mini_batches":    4,    # v2: 2  → match v13
 
         "discount_factor": 0.99,
         "lambda":          0.95,
 
-        # LR=3e-4 confirmed by c52g7m0z/tpgbpxwn/8g5sw7au: all reach 150+
-        # by 200-275k.  My earlier 1e-4 "fix" (prcnkpyq) reached only +3 at
-        # 275k — killing learning by over-constraining early exploration.
-        # Root cause of ratio blowup was KL stop using MEAN KL (diluted by
-        # 95% of transitions at ratio≈1), fixed by ratio_max_threshold below.
         "learning_rate":                  3e-4,
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
 
         "linear_lr_decay":         True,
-        "lr_decay_start_fraction": 0.2,
+        "lr_decay_start_fraction": 0.2,  # v2: 0.3 → match v13
         "min_lr_fraction":         0.1,
 
         # obs_dim = 190 unchanged (same slots, zeroed where internal state was)
@@ -147,25 +128,21 @@ CONFIG = {
         "learning_starts":  0,
 
         "grad_norm_clip":         0.5,
-        "ratio_clip":             0.2,
+        "ratio_clip":             0.015,
         "value_clip":             0.2,
         "clip_predicted_values":  False,
 
-        "entropy_loss_scale":       0.005,
+        # v3: match v13 entropy schedule (0.005 → 0.0005)
+        # v2 used 0.05 start (10× too high), causing entropy dominance.
+        "entropy_loss_scale":       0.005,  # v2: 0.02 → match v13
         "entropy_annealing":        True,
-        "entropy_loss_scale_start": 0.005,
-        "entropy_loss_scale_end":   0.0005,
+        "entropy_loss_scale_start": 0.005,  # v2: 0.05 → match v13
+        "entropy_loss_scale_end":   0.0005, # v2: 0.01 → match v13
         "debug_entropy_stats":      False,
 
         "value_loss_scale":   1.0,
         "kl_threshold":       0.05,
-        "kl_warmup_fraction": 0.0,
-        # ratio_max_threshold: stop epoch loop when any mini-batch's
-        # ratio_max_abs_dev exceeds this.  Catches per-transition drift
-        # that mean-KL misses (c52g7m0z hit ratio_mad=14 with mean KL<0.05).
-        # 2.0 allows ratio ∈ [0, 3.0] per step, preventing catastrophic
-        # forgetting while preserving the large early-phase policy jumps
-        # that drive the -30 → +150 transition.
+        "kl_warmup_fraction": 0.0,  # v2: 0.3 → match v13 (enable KL from step 1)
         "ratio_max_threshold":  2.0,
 
         "rewards_shaper": lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),
@@ -173,9 +150,7 @@ CONFIG = {
         "weight_decay":       1e-4,
         "comm_reg_scale":     0.001,
 
-        # Matches continuous_coord middle ground: 128 hidden × 2 blocks ≈
-        # MAPPO's [128, 64] MLP capacity via transformer attention.
-        # Previous 256/2/4/64/256 combined with clip=0.2 blew ratio_mad to 10.
+        # Architecture: match v13 exactly for valid ablation.
         "hidden_dim":  128,
         "num_blocks":  2,
         "num_heads":   1,
@@ -193,6 +168,6 @@ CONFIG = {
     },
 
     "memory": {
-        "size": 1024,
+        "size": 1024,  # v2: 256 → match v13 rollouts
     },
 }
