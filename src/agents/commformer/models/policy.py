@@ -202,23 +202,35 @@ class CommFormerPolicyNet(CategoricalMixin, Model):
 
         if b >= n and b % n == 0:
             groups = b // n
+
+            # Agent-ID injection (Fix for encoder permutation invariance):
+            # In env-major layout [env0/a0, env0/a1, ..., env0/aN-1, env1/a0, ...],
+            # agent position i's rows are at indices i, N+i, 2N+i, ...
+            # Within each group of N rows, positions run [0, 1, ..., N-1].
+            agent_pos = jnp.tile(jnp.arange(n, dtype=jnp.int32), groups)  # (B,)
+            agent_onehot = jax.nn.one_hot(agent_pos, n)  # (B, N)
+            agent_id_embed = nn.Dense(
+                self.hidden_dim,
+                kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
+                name="agent_id_embed",
+            )
+            x_emb = x_emb + agent_id_embed(agent_onehot)
+
             x_grouped = x_emb.reshape(groups, n, self.hidden_dim)
 
-            # Communication graph: Gumbel-Max at rollout (exploration),
-            # deterministic k-argmax at update (ratio stability).
-            # Detected via taken_actions: present ↔ PPO update path.
-            # At rollout, CategoricalMixin.act injects inputs["key"] which
-            # we reuse so no extra rng infrastructure is needed.
-            _in_update = "taken_actions" in inputs
-            _gumbel_rng = (
-                None if _in_update else inputs.get("key", None)
-            )
+            # Communication graph: always deterministic k-argmax (rng=None).
+            # PPO requires adj_rollout == adj_update for IS ratio = 1.0 at epoch 0.
+            # Gumbel at rollout would produce a different top-k than deterministic
+            # at update, inflating IS ratio before any gradient step.
+            # Gradient signal flows via the STE already in _k_hot:
+            #   return hard - stop_gradient(soft) + soft
+            # so d adj / d alpha = d softmax(alpha) / d alpha (non-zero always).
             comm = CommGraph(
                 num_agents=n,
                 sparsity=self.sparsity,
                 name="comm_graph",
             )
-            adj, alpha_raw = comm(rng=_gumbel_rng, training=not _in_update)
+            adj, alpha_raw = comm(rng=None, training=False)
             # Guarantee self-loops: decoder causal mask restricts agent-0
             # to column 0; if adj[0,0]=0 → all-masked row → NaN softmax.
             adj = jnp.maximum(adj, jnp.eye(n, dtype=adj.dtype))
