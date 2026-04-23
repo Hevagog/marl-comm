@@ -342,7 +342,15 @@ class BiMamba(nn.Module):
 
 # Cross-attentional Mamba — replaces cross-attention in decoder
 class CrossMambaBlock(MambaBlock):
-    """Mamba with cross-attention: B,Δ from x1; C from x2."""
+    """Mamba with cross-attention: Δ from x1; B,C from x2 (obs_rep).
+
+    B (input gate) and C (readout) are both derived from x2 so that
+    the hidden state h = A_bar * h_prev + Δ · B · x1 depends on
+    observation context.  This allows the associative scan to propagate
+    observation information across agent positions — without it, the
+    scan only carries action information and obs_rep influence is
+    restricted to a per-position readout (no cross-agent mixing).
+    """
 
     def setup(self) -> None:
         a = self.args
@@ -386,8 +394,9 @@ class CrossMambaBlock(MambaBlock):
             bias_init=_init_delta_bias,
         )
 
-        # Cross-attention specific: x_proj outputs (Δ, B) only; C comes from C_proj
-        self.x_proj = nn.Dense(a.delta_rank + a.d_state, use_bias=False)
+        # Cross-attention specific: Δ from x1; B and C from x2 (obs_rep)
+        self.x_proj = nn.Dense(a.delta_rank, use_bias=False)
+        self.B_proj = nn.Dense(a.d_state, use_bias=False)
         self.C_proj = nn.Dense(a.d_state, use_bias=False)
 
     # ---- parallel ----
@@ -424,8 +433,8 @@ class CrossMambaBlock(MambaBlock):
     # ---- cross-SSM internals ----
     def _cross_ssm(self, x1: jax.Array, x2: jax.Array) -> jax.Array:
         A = -jnp.exp(self.A_log)
-        db = self.x_proj(x1)
-        delta_raw, B = jnp.split(db, [self.args.delta_rank], axis=-1)
+        delta_raw = self.x_proj(x1)
+        B = self.B_proj(x2)
         C = self.C_proj(x2)
         delta = nn.softplus(self.delta_proj(delta_raw))
         return self._selective_scan(x1, delta, A, B, C)
@@ -434,8 +443,8 @@ class CrossMambaBlock(MambaBlock):
         self, x1: jax.Array, x2: jax.Array, hidden_state: HiddenState
     ) -> tuple[jax.Array, HiddenState]:
         A = -jnp.exp(self.A_log)
-        db = self.x_proj(x1)
-        delta_raw, B = jnp.split(db, [self.args.delta_rank], axis=-1)
+        delta_raw = self.x_proj(x1)
+        B = self.B_proj(x2)
         C = self.C_proj(x2)
         delta = nn.softplus(self.delta_proj(delta_raw))
         return self._recurrent_scan(x1, delta, A, B, C, hidden_state)

@@ -28,7 +28,7 @@ from skrl.models.jax import CategoricalMixin, Model
 from agents.shared.mamba_blocks import BiMamba, CrossMamba, FIFOBuffer, Mamba
 
 _HIDDEN_GAIN = jnp.sqrt(2.0)
-_OUTPUT_GAIN = 0.01
+_OUTPUT_GAIN = 0.1
 
 
 class EncodeBlock(nn.Module):

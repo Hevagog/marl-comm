@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 CONFIG = {
     "experiment": {
-        "name":             "mam_warehouse_nocomm_v2",
+        "name":             "mam_warehouse_nocomm_v4",
         "agent_type":       "mam",
         "directory":        "runs",
         "wandb":            True,
@@ -97,12 +97,12 @@ CONFIG = {
     "mam": {
         "rollouts":        256,
         "learning_epochs": 10,
-        "mini_batches":    2,
+        "mini_batches":    2,      # 8 created undersized batches for grouped shuffle
 
         "discount_factor": 0.99,   
         "lambda":          0.95,  # longer GAE horizon for multi-step lifecycle (Pick→Treat→Deliver spans 50–200 steps)
 
-        "learning_rate":                  3e-4,   # scaled from 1.5e-4: match MAPPO baseline (analysis: LR too conservative)
+        "learning_rate":                  3e-4,   # match MAPPO baseline
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay":          True,
@@ -110,11 +110,9 @@ CONFIG = {
         "min_lr_fraction":          0.1,
 
         "state_preprocessor":                RunningStandardScaler,
-        "state_preprocessor_kwargs":         {"size": 262},   # 24x32 grid, 16 agents, vision_range=2 → verified via env
-        "update_state_preprocessor_in_update": False,
+        "state_preprocessor_kwargs":         {"size": 190},
         "shared_state_preprocessor":         RunningStandardScaler,
-        "shared_state_preprocessor_kwargs":  {"size": 4736},  # 24*32*6 + 16*8 + 16 one-hot → verified via env
-        "update_shared_state_preprocessor_in_update": False,
+        "shared_state_preprocessor_kwargs":  {"size": 1184},
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
 
@@ -132,7 +130,9 @@ CONFIG = {
         "entropy_loss_scale_end":   0.01,
         "value_loss_scale":   1.0,   # scaled from 0.5: full critic gradient for faster GAE convergence
 
-        "kl_threshold": 0,
+        "kl_threshold": 0.05,    # KL early-stop safety valve (was 0 = disabled → NaN)
+        "kl_warmup_fraction": 0.3,  # skip KL check for first 30% of training
+        "weight_decay":       1e-4, # AdamW regularisation
 
         "rewards_shaper":       lambda rewards, *args: jnp.clip(rewards, -5.0, 20.0),  # clip extremes; None caused large negative advantages destabilizing training
         "time_limit_bootstrap": True,
@@ -145,7 +145,7 @@ CONFIG = {
         "n_block":     1,      # one Encoder + one Decoder block (paper default)
 
         "d_state":     64,     # scaled from 32: 2× for 4× more agents; maintains SSM memory across 16-step AR chain
-        "d_conv":      1,      # Use causal-safe conv width 1 so parallel teacher forcing matches AR rollout.
+        "d_conv":      4,      # paper default; d_conv=1 is degenerate (pointwise, no causal context)
         "delta_rank":  64,     # scaled from 16: match d_state order of magnitude for richer input-dependent transitions
     },
 
