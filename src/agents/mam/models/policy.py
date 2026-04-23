@@ -23,12 +23,24 @@ import jax.numpy as jnp
 import numpy as np
 from flax.linen.initializers import orthogonal
 
+import wandb
+
+_obs_debug_step = 0
+
+
+def _log_obs_stats(obs_val):
+    global _obs_debug_step
+    _obs_debug_step += 1
+    if _obs_debug_step % 500 == 0 and wandb.run is not None:
+        wandb.log({"debug/obs_absmax_post_scaler": float(jnp.max(jnp.abs(obs_val)))})
+
+
 from skrl.models.jax import CategoricalMixin, Model
 
 from agents.shared.mamba_blocks import BiMamba, CrossMamba, FIFOBuffer, Mamba
 
 _HIDDEN_GAIN = jnp.sqrt(2.0)
-_OUTPUT_GAIN = 0.1
+_OUTPUT_GAIN = 0.01
 
 
 class EncodeBlock(nn.Module):
@@ -79,6 +91,7 @@ class Encoder(nn.Module):
     def setup(self) -> None:
         self.obs_encoder = nn.Sequential(
             [
+                nn.LayerNorm(),
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
             ]
@@ -138,9 +151,13 @@ class DecodeBlock(nn.Module):
         """
         x       : (batch, n_agent, n_embd)  — action embeddings
         obs_rep : (batch, n_agent, n_embd)  — encoder output
+
+        Follows the InstaDeep reference DecodeBlock (mam_networks.py:158-164):
+        after the cross-attn, the carrier switches to ``obs_rep`` so the obs
+        representation has a direct residual path into the logits head.
         """
         x = x + self.mamba_self(self.ln1(x))
-        x = x + self.mamba_cross((self.ln2(x), obs_rep))
+        x = obs_rep + self.mamba_cross((self.ln2(x), obs_rep))
         x = x + self.mlp(self.ln3(x))
         return x
 
@@ -166,7 +183,7 @@ class DecodeBlock(nn.Module):
             cross_hs,
             cross_buf,
         )
-        x = x + x_cross
+        x = obs_rep + x_cross
         x = x + self.mlp(self.ln3(x))
         return x, self_hs, self_buf, cross_hs, cross_buf
 
@@ -360,6 +377,13 @@ class MAMPolicyNet(CategoricalMixin, Model):
 
     def __call__(self, inputs: Mapping[str, Any], role: str = ""):
         x = inputs["states"]  # (B, obs_dim)
+
+        # --- debug log observation magnitude (opt-in via mamba_args.debug_stats) ---
+        if hasattr(self, "mamba_args") and getattr(
+            self.mamba_args, "debug_stats", False
+        ):
+            jax.debug.callback(_log_obs_stats, x)
+
         taken_actions = inputs.get("taken_actions", None)
         ar_key = inputs.get("ar_key", None)
 

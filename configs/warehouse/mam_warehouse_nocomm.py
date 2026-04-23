@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
 CONFIG = {
     "experiment": {
-        "name":             "mam_warehouse_nocomm_v4",
+        "name":             "mam_warehouse_nocomm_v5_scaler",
         "agent_type":       "mam",
         "directory":        "runs",
         "wandb":            True,
@@ -96,13 +96,13 @@ CONFIG = {
 
     "mam": {
         "rollouts":        256,
-        "learning_epochs": 10,
+        "learning_epochs": 5,     # 10 caused ratio explosion (grad_norm 5× MAPPO's)
         "mini_batches":    2,      # 8 created undersized batches for grouped shuffle
 
         "discount_factor": 0.99,   
         "lambda":          0.95,  # longer GAE horizon for multi-step lifecycle (Pick→Treat→Deliver spans 50–200 steps)
 
-        "learning_rate":                  3e-4,   # match MAPPO baseline
+        "learning_rate":                  1.5e-4, # reduced: B_proj fix amplifies cross-agent signal
         "learning_rate_scheduler":        None,
         "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay":          True,
@@ -119,7 +119,7 @@ CONFIG = {
         "random_timesteps": 0,
         "learning_starts":  0,
 
-        "grad_norm_clip":         0.5,
+        "grad_norm_clip":         0.25,   # tightened from 0.5: MAM grad_norm was 5× MAPPO
         "ratio_clip":             0.2,    # PPO clip ε
         "value_clip":             0.2,
         "clip_predicted_values":  False,  # match MAPPO and smoke config; True caused over-conservative critic updates

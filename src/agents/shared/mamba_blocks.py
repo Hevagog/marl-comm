@@ -22,6 +22,30 @@ import jax
 import jax.numpy as jnp
 
 
+import wandb
+
+# Global step counter for debug logging inside JAX callbacks
+_mamba_debug_step = 0
+
+
+def _log_mamba_stats(d, a, bx, hh, bb, cc, xx, prefix="mamba"):
+    global _mamba_debug_step
+    _mamba_debug_step += 1
+    if _mamba_debug_step % 500 == 0 and wandb.run is not None:
+        wandb.log(
+            {
+                f"debug/{prefix}_delta_max": float(jnp.max(d)),
+                f"debug/{prefix}_delta_mean": float(jnp.mean(d)),
+                f"debug/{prefix}_A_bar_min": float(jnp.min(a)),
+                f"debug/{prefix}_Bx_absmax": float(jnp.max(jnp.abs(bx))),
+                f"debug/{prefix}_h_absmax": float(jnp.max(jnp.abs(hh))),
+                f"debug/{prefix}_B_absmax": float(jnp.max(jnp.abs(bb))),
+                f"debug/{prefix}_C_absmax": float(jnp.max(jnp.abs(cc))),
+                f"debug/{prefix}_x_absmax": float(jnp.max(jnp.abs(xx))),
+            }
+        )
+
+
 # Type aliases for recurrent state
 HiddenState = jax.Array  # (batch, 1, d_inner, d_state)
 Buffer = jax.Array  # (batch, d_conv, d_inner)
@@ -36,10 +60,17 @@ class MambaArgs:
     delta_rank: int  # rank of Δ projection
     expand: int = 2  # expansion factor → d_inner = d_model * expand
     delta_min: float = 0.001
-    delta_max: float = 0.1
+    delta_max: float = 0.1  # initialisation upper bound (Gu & Dao 2024 §3.6)
     delta_init: str = "random"
     delta_scale: float = 1.0
     delta_init_floor: float = 1e-4
+    # Forward-pass clamp on softplus(Δ) to prevent runaway SSM state after
+    # weight drift during training.  Default 20.0 is ~200× the init upper
+    # bound — loose enough to leave healthy training dynamics untouched,
+    # tight enough to prevent Bx = Δ·B·x overflow that produced the NaN
+    # observed in mam_warehouse_nocomm_v4/v5/v6 at step 50k–100k.
+    delta_forward_clamp: float = 20.0
+    debug_stats: bool = False
 
     @property
     def d_inner(self) -> int:
@@ -167,6 +198,7 @@ class MambaBlock(nn.Module):
             axis=-1,
         )
         delta = nn.softplus(self.delta_proj(delta_raw))
+        delta = jnp.clip(delta, a_max=self.args.delta_forward_clamp)
         return self._selective_scan(x, delta, A, B, C)
 
     def _ssm_recurrent(
@@ -180,6 +212,7 @@ class MambaBlock(nn.Module):
             axis=-1,
         )
         delta = nn.softplus(self.delta_proj(delta_raw))
+        delta = jnp.clip(delta, a_max=self.args.delta_forward_clamp)
         return self._recurrent_scan(x, delta, A, B, C, hidden_state)
 
     def _selective_scan(
@@ -204,6 +237,12 @@ class MambaBlock(nn.Module):
 
         _, h = jax.lax.associative_scan(_assoc_op, (A_bar, Bx), axis=1)
         y = jnp.einsum("b l d n, b l n -> b l d", h, C)
+
+        if getattr(self.args, "debug_stats", False):
+            jax.debug.callback(
+                _log_mamba_stats, delta, A_bar, Bx, h, B, C, x, self.name or "mamba"
+            )
+
         return y + x * self.D
 
     def _recurrent_scan(
@@ -342,14 +381,19 @@ class BiMamba(nn.Module):
 
 # Cross-attentional Mamba — replaces cross-attention in decoder
 class CrossMambaBlock(MambaBlock):
-    """Mamba with cross-attention: Δ from x1; B,C from x2 (obs_rep).
+    """Mamba with cross-attention: Δ,B from x1 (actions); C from x2 (obs_rep).
 
-    B (input gate) and C (readout) are both derived from x2 so that
-    the hidden state h = A_bar * h_prev + Δ · B · x1 depends on
-    observation context.  This allows the associative scan to propagate
-    observation information across agent positions — without it, the
-    scan only carries action information and obs_rep influence is
-    restricted to a per-position readout (no cross-agent mixing).
+    Matches Daniel et al. 2024 §3.2 / Fig. 5 and the InstaDeep reference
+    (assets/mam-code/mava/networks/mamba_crossattention_block.py):
+
+        - Δ and B depend on the target (source-being-scanned) sequence x1.
+        - Only C (the readout) depends on the second input x2.
+
+    The discretised SSM is h_t = Ā_t h_{t-1} + B̄_t · x1_t with
+    Ā_t = exp(Δ_t(x1) · A), B̄_t = Δ_t(x1) · B(x1).  The readout
+    y_t = C_t(x2) · h_t mixes obs information position-wise.  This
+    preserves the causal action-AR chain required by the multi-agent
+    advantage-decomposition theorem (Kuba et al. 2022).
     """
 
     def setup(self) -> None:
@@ -394,9 +438,9 @@ class CrossMambaBlock(MambaBlock):
             bias_init=_init_delta_bias,
         )
 
-        # Cross-attention specific: Δ from x1; B and C from x2 (obs_rep)
-        self.x_proj = nn.Dense(a.delta_rank, use_bias=False)
-        self.B_proj = nn.Dense(a.d_state, use_bias=False)
+        # Cross-attention (matches reference mamba_crossattention_block.py:131-133):
+        #   x_proj(x1) → (Δ, B); C_proj(x2) → C.
+        self.x_proj = nn.Dense(a.delta_rank + a.d_state, use_bias=False)
         self.C_proj = nn.Dense(a.d_state, use_bias=False)
 
     # ---- parallel ----
@@ -433,20 +477,22 @@ class CrossMambaBlock(MambaBlock):
     # ---- cross-SSM internals ----
     def _cross_ssm(self, x1: jax.Array, x2: jax.Array) -> jax.Array:
         A = -jnp.exp(self.A_log)
-        delta_raw = self.x_proj(x1)
-        B = self.B_proj(x2)
+        delta_B = self.x_proj(x1)
+        delta_raw, B = jnp.split(delta_B, [self.args.delta_rank], axis=-1)
         C = self.C_proj(x2)
         delta = nn.softplus(self.delta_proj(delta_raw))
+        delta = jnp.clip(delta, a_max=self.args.delta_forward_clamp)
         return self._selective_scan(x1, delta, A, B, C)
 
     def _cross_ssm_recurrent(
         self, x1: jax.Array, x2: jax.Array, hidden_state: HiddenState
     ) -> tuple[jax.Array, HiddenState]:
         A = -jnp.exp(self.A_log)
-        delta_raw = self.x_proj(x1)
-        B = self.B_proj(x2)
+        delta_B = self.x_proj(x1)
+        delta_raw, B = jnp.split(delta_B, [self.args.delta_rank], axis=-1)
         C = self.C_proj(x2)
         delta = nn.softplus(self.delta_proj(delta_raw))
+        delta = jnp.clip(delta, a_max=self.args.delta_forward_clamp)
         return self._recurrent_scan(x1, delta, A, B, C, hidden_state)
 
 
