@@ -71,6 +71,7 @@ class _Encoder(nn.Module):
     def setup(self) -> None:
         self.obs_encoder = nn.Sequential(
             [
+                nn.LayerNorm(),
                 nn.Dense(self.n_embd, kernel_init=orthogonal(_HIDDEN_GAIN)),
                 nn.gelu,
             ]
