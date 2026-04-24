@@ -78,6 +78,59 @@ def compute_rewards(
     # --- collision penalty ---
     rewards += collision_mask.astype(np.float32) * config.penalty_collision
 
+    # --- team-synchronized delivery bonus  ---
+    # Pays the team_delivery_bonus to every agent that delivered within
+    # the same `team_delivery_window` of steps as this delivery.  Designed
+    # to make MAPPO's per-agent advantage estimator under-credit deliveries
+    # that lack temporal cooperation, opening a measurable gap for methods
+    # that share peer-phase information (CommFormer / MAM / Hopfield).
+    if config.enable_team_delivery_bonus and delivery_success.any():
+        window = max(1, config.team_delivery_window)
+        last = state.agent.last_delivery_step
+        active = state.agent.active
+        for i in np.where(delivery_success)[0]:
+            partners = 0
+            for j in range(config.max_agents):
+                if j == i or not active[j]:
+                    continue
+                if last[j] < 0:
+                    continue
+                if state.step_count - int(last[j]) <= window:
+                    partners += 1
+            if partners >= config.team_delivery_min_partners:
+                rewards[i] += config.team_delivery_bonus
+                # Also reward the partners — symmetric joint signal.
+                for j in range(config.max_agents):
+                    if j == i or not active[j]:
+                        continue
+                    if last[j] < 0:
+                        continue
+                    if state.step_count - int(last[j]) <= window:
+                        rewards[j] += config.team_delivery_bonus
+
+    # --- rendezvous occupancy bonus (Scenario 2) ---
+    if config.enable_rendezvous and state.grid.rendezvous_positions.size > 0:
+        rendez = state.grid.rendezvous_positions
+        for k in range(rendez.shape[0]):
+            r, c = int(rendez[k, 0]), int(rendez[k, 1])
+            if r < 0 or c < 0:
+                continue
+            occupants = []
+            for i in range(config.max_agents):
+                if not state.agent.active[i]:
+                    continue
+                if (
+                    int(state.agent.positions[i, 0]) == r
+                    and int(state.agent.positions[i, 1]) == c
+                ):
+                    occupants.append(i)
+            if len(occupants) >= config.rendezvous_min_agents:
+                # Per-step bonus while the rendezvous is active.  Coordination
+                # is rewarded continuously while occupants stay together; no
+                # need for explicit cooldown bookkeeping in state.
+                for i in occupants:
+                    rewards[i] += config.reward_rendezvous
+
     # --- rescue proximity shaping ---
     # Provides intermediate gradient for the rescue navigation sub-task.
     # Without this, agents must navigate 10-30 steps to a stranded teammate
@@ -89,9 +142,7 @@ def compute_rewards(
 
         stranded = _stranded_mask(state)
         stranded_positions = [
-            state.agent.positions[j]
-            for j in range(config.max_agents)
-            if stranded[j]
+            state.agent.positions[j] for j in range(config.max_agents) if stranded[j]
         ]
         if stranded_positions:
             scale = config.reward_rescue_proximity

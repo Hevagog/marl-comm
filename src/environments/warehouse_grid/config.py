@@ -105,6 +105,25 @@ class WarehouseConfig:
     battery_critical_threshold: int = 15  # forced return to charger below this
     num_charging_stations: int = 2
 
+    # Team-synchronized delivery bonus
+    # When True, every delivery emits a team bonus shared by any agent that
+    # ALSO delivered within the last `team_delivery_window` steps.  Forces
+    # temporal coordination of the Pick→Treat→Deliver chain across agents.
+    enable_team_delivery_bonus: bool = False
+    team_delivery_window: int = 20
+    team_delivery_bonus: float = 5.0
+    team_delivery_min_partners: int = 1  # need at least this many co-deliverers
+
+    # Rendezvous cell
+    # When True, env places `num_rendezvous` cells.  Standing on one with at
+    # least `rendezvous_min_agents` total agents on it pays each occupant
+    # `reward_rendezvous`.  Only paid once per visit (one-shot per occupancy).
+    enable_rendezvous: bool = False
+    num_rendezvous: int = 1
+    rendezvous_min_agents: int = 2
+    reward_rendezvous: float = 20.0
+    rendezvous_cooldown: int = 50  # steps between re-trigger of same cell
+
     fault_profile: FaultProfile = field(default_factory=FaultProfile)
 
     def __post_init__(self):

@@ -13,6 +13,7 @@ class CellType(IntEnum):
     SPAWN = 5
     CHARGER = 6
     REPAIR = 7
+    RENDEZVOUS = 8
 
 
 class ResourcePhase(IntEnum):
@@ -68,6 +69,9 @@ class AgentState(NamedTuple):
     burst_failed: np.ndarray
     failed: np.ndarray
 
+    delivery_count: np.ndarray
+    last_delivery_step: np.ndarray
+
 
 class TaskInfo(NamedTuple):
     """A single pending task in the dynamic task queue.
@@ -115,6 +119,7 @@ class GridState(NamedTuple):
 
     charger_positions: np.ndarray
     repair_position: np.ndarray
+    rendezvous_positions: np.ndarray
 
 
 class EnvState(NamedTuple):

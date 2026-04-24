@@ -188,6 +188,9 @@ def _create_deterministic_layout(config: WarehouseConfig) -> GridState:
             pos = shelf_positions[i]
             task_priorities[pos[0], pos[1]] = 1.0
 
+    # --- Rendezvous cells (Scenario 2) ---
+    rendezvous_positions = _place_rendezvous_cells(config, layout, H, W)
+
     # --- Interference map  ---
     interference_map = _build_interference_map(config, treatment_positions)
 
@@ -202,7 +205,41 @@ def _create_deterministic_layout(config: WarehouseConfig) -> GridState:
         interference_map=interference_map,
         charger_positions=charger_positions,
         repair_position=repair_position,
+        rendezvous_positions=rendezvous_positions,
     )
+
+
+def _place_rendezvous_cells(
+    config: WarehouseConfig,
+    layout: np.ndarray,
+    H: int,
+    W: int,
+) -> np.ndarray:
+    """Place rendezvous cells in the central interior.
+
+    Returns an (k, 2) int32 array of placed positions (always at least one
+    row, even when disabled, so the GridState shape is stable).
+    """
+    if not config.enable_rendezvous or config.num_rendezvous <= 0:
+        return np.full((1, 2), -1, dtype=np.int32)
+
+    placed: list[list[int]] = []
+    mid_r, mid_c = H // 2, W // 2
+    candidates = [
+        (mid_r, mid_c),
+        (mid_r, mid_c + 1),
+        (mid_r + 1, mid_c),
+        (mid_r - 1, mid_c),
+    ]
+    for r, c in candidates:
+        if len(placed) >= config.num_rendezvous:
+            break
+        if 0 <= r < H and 0 <= c < W and layout[r, c] == CellType.EMPTY:
+            layout[r, c] = CellType.RENDEZVOUS
+            placed.append([r, c])
+    if not placed:
+        return np.full((1, 2), -1, dtype=np.int32)
+    return np.array(placed, dtype=np.int32)
 
 
 def _sample_with_min_spacing(
@@ -315,17 +352,13 @@ def _create_jittered_layout(
     for pos in treatment_positions:
         layout[int(pos[0]), int(pos[1])] = CellType.TREATMENT
 
-    goal_positions = np.array(
-        [[service_row, c] for c in goal_cols], dtype=np.int32
-    )
+    goal_positions = np.array([[service_row, c] for c in goal_cols], dtype=np.int32)
     for pos in goal_positions:
         layout[int(pos[0]), int(pos[1])] = CellType.GOAL
 
     # --- Top corridor: spawns + repair ----------------------------------
     n_top = config.max_agents + 1  # +1 for repair
-    top_cols = _sample_with_min_spacing(
-        rng, interior_cols, n_top, min_spacing=1
-    )
+    top_cols = _sample_with_min_spacing(rng, interior_cols, n_top, min_spacing=1)
     if top_cols is None:
         return None
     # Pick a random one of the chosen columns to host the repair cell so
@@ -379,6 +412,7 @@ def _create_jittered_layout(
             pos = shelf_positions_arr[i]
             task_priorities[int(pos[0]), int(pos[1])] = 1.0
 
+    rendezvous_positions = _place_rendezvous_cells(config, layout, H, W)
     interference_map = _build_interference_map(config, treatment_positions)
 
     return GridState(
@@ -392,6 +426,7 @@ def _create_jittered_layout(
         interference_map=interference_map,
         charger_positions=charger_positions,
         repair_position=repair_position,
+        rendezvous_positions=rendezvous_positions,
     )
 
 

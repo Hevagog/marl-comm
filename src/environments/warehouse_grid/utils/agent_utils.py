@@ -71,6 +71,8 @@ def create_agent_state(
         being_dragged_by=np.full(m, -1, dtype=np.int32),
         burst_failed=np.zeros(m, dtype=np.bool_),
         failed=np.zeros(m, dtype=np.bool_),
+        delivery_count=np.zeros(m, dtype=np.int32),
+        last_delivery_step=np.full(m, -10_000, dtype=np.int32),
     )
 
 
@@ -170,7 +172,7 @@ def get_agent_observation(
                         (other_pos[0] - row) / H,
                         (other_pos[1] - col) / W,
                         float(state.agent.carrying[i] > 0),  # shelf visible on robot
-                        0.0,   # active flag requires radio — zero in no-comm
+                        0.0,  # active flag requires radio — zero in no-comm
                         float(stranded[i]),  # stopped robot is physically detectable
                     ]
                 )
@@ -607,6 +609,8 @@ def apply_interactions(
     new_rescue_target = state.agent.rescue_target.copy()
     new_being_dragged_by = state.agent.being_dragged_by.copy()
     new_total_deliveries = state.total_deliveries
+    new_delivery_count = state.agent.delivery_count.copy()
+    new_last_delivery = state.agent.last_delivery_step.copy()
 
     interact_mask = (actions == Actions.INTERACT) & state.agent.active
     stranded = _stranded_mask(state)
@@ -692,6 +696,8 @@ def apply_interactions(
             new_phase[agent_idx] = ResourcePhase.UNPICKED
             delivery_success[agent_idx] = True
             new_total_deliveries += delivered_count
+            new_delivery_count[agent_idx] += delivered_count
+            new_last_delivery[agent_idx] = state.step_count
 
     new_agent = state.agent._replace(
         positions=new_positions.astype(np.int32),
@@ -701,6 +707,8 @@ def apply_interactions(
         locked=new_locked,
         rescue_target=new_rescue_target,
         being_dragged_by=new_being_dragged_by,
+        delivery_count=new_delivery_count,
+        last_delivery_step=new_last_delivery,
     )
     new_grid = state.grid._replace(shelf_resources=new_shelf_resources)
     new_state = state._replace(

@@ -343,7 +343,9 @@ class MultiRobotWarehouseEnv:
             "active": bool(self._state.agent.active[idx]),
             "carrying": int(self._state.agent.carrying[idx]),
             "phase": int(self._state.agent.resource_phase[idx]),
+            "deliveries": int(self._state.agent.delivery_count[idx]),
             "total_deliveries": int(self._state.total_deliveries),
+            "last_delivery_step": int(self._state.agent.last_delivery_step[idx]),
             "stranded": bool(
                 (not self._state.agent.active[idx])
                 and (
@@ -359,6 +361,20 @@ class MultiRobotWarehouseEnv:
             "battery_dead": bool(self._state.agent.battery_dead[idx]),
             "failed": bool(self._state.agent.failed[idx]),
         }
+        #  is this agent currently standing on a rendezvous cell?
+        if self._config.enable_rendezvous:
+            r, c = (
+                int(self._state.agent.positions[idx, 0]),
+                int(self._state.agent.positions[idx, 1]),
+            )
+            on_r = False
+            for k in range(self._state.grid.rendezvous_positions.shape[0]):
+                rr = int(self._state.grid.rendezvous_positions[k, 0])
+                cc = int(self._state.grid.rendezvous_positions[k, 1])
+                if rr == r and cc == c:
+                    on_r = True
+                    break
+            info["on_rendezvous"] = on_r
         if self._config.enable_battery:
             info["battery"] = int(self._state.agent.battery[idx])
             info["charging"] = bool(self._state.agent.charging[idx])
