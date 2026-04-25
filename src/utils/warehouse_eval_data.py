@@ -73,13 +73,16 @@ class AgentState:
     stranded: bool = False
     charging: bool = False
     dragging: bool = False
-    rescue_target: Optional[int] = None
-    being_dragged_by: Optional[int] = None
+    rescue_target: int | None = None
+    being_dragged_by: int | None = None
     burst_failed: bool = False
     battery_dead: bool = False
     failed: bool = False
     total_deliveries: int = 0
-    position: Tuple[int, int] = (0, 0)  # (row, col) decoded from obs
+    deliveries: int = 0  # per-agent cumulative deliveries (env.info["deliveries"])
+    last_delivery_step: int = -1  # step at which this agent last delivered (-1 = never)
+    on_rendezvous: bool = False
+    position: tuple[int, int] = (0, 0)  # (row, col) decoded from obs
 
     @property
     def is_battery_critical(self) -> bool:
@@ -99,9 +102,9 @@ class StepRecord:
     """All per-agent data captured at one environment step."""
 
     step: int
-    agent_states: Dict[str, AgentState] = field(default_factory=dict)
-    actions: Dict[str, int] = field(default_factory=dict)
-    rewards: Dict[str, float] = field(default_factory=dict)
+    agent_states: dict[str, AgentState] = field(default_factory=dict)
+    actions: dict[str, int] = field(default_factory=dict)
+    rewards: dict[str, float] = field(default_factory=dict)
 
     # Environment-level fields (same for all agents)
     pending_tasks: int = 0
@@ -112,22 +115,22 @@ class StepRecord:
         return sum(self.rewards.values())
 
     @property
-    def active_agents(self) -> List[str]:
+    def active_agents(self) -> list[str]:
         return [a for a, s in self.agent_states.items() if s.active]
 
     @property
-    def battery_critical_agents(self) -> List[str]:
+    def battery_critical_agents(self) -> list[str]:
         return [a for a, s in self.agent_states.items() if s.is_battery_critical]
 
     @property
-    def rescuing_agents(self) -> List[str]:
+    def rescuing_agents(self) -> list[str]:
         return [a for a, s in self.agent_states.items() if s.dragging]
 
     @property
-    def stranded_agents(self) -> List[str]:
+    def stranded_agents(self) -> list[str]:
         return [a for a, s in self.agent_states.items() if s.stranded]
 
-    def phase_counts(self) -> Dict[int, int]:
+    def phase_counts(self) -> dict[int, int]:
         counts = {p: 0 for p in PHASE_NAMES}
         for s in self.agent_states.values():
             if s.active:
@@ -143,10 +146,10 @@ class EpisodeData:
     """All step records for one evaluation episode."""
 
     episode_idx: int
-    steps: List[StepRecord] = field(default_factory=list)
+    steps: list[StepRecord] = field(default_factory=list)
     terminated: bool = False
     truncated: bool = False
-    agents: List[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)
 
     @property
     def length(self) -> int:
@@ -154,18 +157,62 @@ class EpisodeData:
 
     @property
     def total_deliveries(self) -> int:
-        """Sum of per-agent cumulative deliveries at the last step."""
+        """Total deliveries this episode.
+
+        Prefers the env-global counter (`AgentState.total_deliveries`) which is
+        replicated to every agent's info dict — taking the **max** across
+        agents avoids the historical bug where summing replicated globals
+        inflated the count by `num_agents`.  Falls back to summing per-agent
+        `deliveries` when the global counter is absent (older runs).
+        """
         if not self.steps:
             return 0
         last = self.steps[-1]
-        return sum(s.total_deliveries for s in last.agent_states.values())
+        if not last.agent_states:
+            return 0
+        global_max = max(s.total_deliveries for s in last.agent_states.values())
+        if global_max > 0:
+            return global_max
+        return sum(s.deliveries for s in last.agent_states.values())
 
     @property
-    def deliveries_by_agent(self) -> Dict[str, int]:
+    def deliveries_by_agent(self) -> dict[str, int]:
+        """Per-agent cumulative deliveries at the last step.
+
+        Reads `AgentState.deliveries` (env.info["deliveries"]) which is now a
+        true per-agent counter; falls back to 0 when not present.
+        """
         if not self.steps:
             return {}
         last = self.steps[-1]
-        return {a: s.total_deliveries for a, s in last.agent_states.items()}
+        return {a: s.deliveries for a, s in last.agent_states.items()}
+
+    # ── Scenario-specific aggregates ──────────────────────────────────────
+
+    def synchronized_delivery_events(self, window: int = 20) -> int:
+        """Count deliveries that fell within `window` steps of another agent's
+        delivery this episode.  Drives the team-sync bonus metric (Scenario 1).
+        """
+        delivery_steps_per_agent = {
+            a: self.delivery_steps(a) for a in self.agents
+        }
+        sync = 0
+        for a, my_steps in delivery_steps_per_agent.items():
+            for t in my_steps:
+                for b, other_steps in delivery_steps_per_agent.items():
+                    if a == b:
+                        continue
+                    if any(abs(t - t2) <= window for t2 in other_steps):
+                        sync += 1
+                        break
+        return sync
+
+    def rendezvous_steps(self) -> int:
+        """Steps where ≥1 agent was on a rendezvous cell (Scenario 2)."""
+        return sum(
+            1 for s in self.steps
+            if any(state.on_rendezvous for state in s.agent_states.values())
+        )
 
     @property
     def expired_tasks_total(self) -> int:
@@ -175,22 +222,22 @@ class EpisodeData:
         return self.steps[-1].expired_tasks_cumulative
 
     @property
-    def total_rewards(self) -> Dict[str, float]:
-        out: Dict[str, float] = {a: 0.0 for a in self.agents}
+    def total_rewards(self) -> dict[str, float]:
+        out: dict[str, float] = {a: 0.0 for a in self.agents}
         for step in self.steps:
             for a, r in step.rewards.items():
                 out[a] = out.get(a, 0.0) + r
         return out
 
-    def rescue_event_steps(self) -> List[int]:
+    def rescue_event_steps(self) -> list[int]:
         """Steps where at least one agent is performing a rescue."""
         return [s.step for s in self.steps if s.rescuing_agents]
 
-    def stranded_event_steps(self) -> List[int]:
+    def stranded_event_steps(self) -> list[int]:
         """Steps where at least one agent is stranded."""
         return [s.step for s in self.steps if s.stranded_agents]
 
-    def delivery_steps(self, agent: str) -> List[int]:
+    def delivery_steps(self, agent: str) -> list[int]:
         """Steps where the agent's cumulative delivery count increased."""
         events = []
         prev = 0
@@ -229,17 +276,17 @@ class EpisodeData:
 class EvalData:
     """Top-level container returned by WarehouseEvalCollector.collect()."""
 
-    episodes: List[EpisodeData] = field(default_factory=list)
+    episodes: list[EpisodeData] = field(default_factory=list)
     grid_height: int = 12
     grid_width: int = 16
     max_cycles: int = 500
     num_agents: int = 4
-    agents: List[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.episodes)
 
-    def all_steps(self) -> List[StepRecord]:
+    def all_steps(self) -> list[StepRecord]:
         return [s for ep in self.episodes for s in ep.steps]
 
     # ── Reward aggregates ──────────────────────────────────────────────────────
@@ -260,9 +307,9 @@ class EvalData:
     def mean_expired_per_episode(self) -> float:
         return float(np.mean([ep.expired_tasks_total for ep in self.episodes]))
 
-    def deliveries_by_agent(self) -> Dict[str, float]:
+    def deliveries_by_agent(self) -> dict[str, float]:
         """Mean deliveries per agent across episodes."""
-        out: Dict[str, List[float]] = {a: [] for a in self.agents}
+        out: dict[str, list[float]] = {a: [] for a in self.agents}
         for ep in self.episodes:
             for a, d in ep.deliveries_by_agent.items():
                 out.setdefault(a, []).append(float(d))
@@ -270,7 +317,7 @@ class EvalData:
 
     # ── Delivery rate over time ───────────────────────────────────────────────
 
-    def mean_cumulative_deliveries_over_time(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def mean_cumulative_deliveries_over_time(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Returns (time_steps, mean_deliveries, std_deliveries) aligned to max_cycles."""
         max_len = self.max_cycles
         mat = np.full((len(self.episodes), max_len), np.nan)
@@ -305,7 +352,7 @@ class EvalData:
 
     # ── Spatial data ─────────────────────────────────────────────────────────
 
-    def position_counts(self, agent: str) -> List[Tuple[int, int]]:
+    def position_counts(self, agent: str) -> list[tuple[int, int]]:
         return [
             s.agent_states[agent].position
             for ep in self.episodes
@@ -322,7 +369,7 @@ class EvalData:
 
     # ── Battery aggregates ────────────────────────────────────────────────────
 
-    def mean_battery_over_time(self, agent: str) -> Tuple[np.ndarray, np.ndarray]:
+    def mean_battery_over_time(self, agent: str) -> tuple[np.ndarray, np.ndarray]:
         """Returns (time_steps, mean_battery) for the given agent."""
         max_len = self.max_cycles
         mat = np.full((len(self.episodes), max_len), np.nan)
@@ -342,10 +389,10 @@ class EvalData:
 
     # ── Role-based summary ────────────────────────────────────────────────────
 
-    def role_deliveries(self) -> Dict[str, float]:
+    def role_deliveries(self) -> dict[str, float]:
         """Mean deliveries grouped by agent speed role (fast vs slow)."""
-        fast_totals: List[float] = []
-        slow_totals: List[float] = []
+        fast_totals: list[float] = []
+        slow_totals: list[float] = []
         for ep in self.episodes:
             for a, d in ep.deliveries_by_agent.items():
                 if not ep.steps:

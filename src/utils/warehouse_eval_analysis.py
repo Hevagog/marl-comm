@@ -58,7 +58,7 @@ def _decode_position(
     obs: np.ndarray,
     grid_height: int,
     grid_width: int,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     row = int(round(float(obs[4]) * max(grid_height - 1, 1)))
     col = int(round(float(obs[5]) * max(grid_width - 1, 1)))
     row = max(0, min(grid_height - 1, row))
@@ -67,7 +67,7 @@ def _decode_position(
 
 
 def _build_agent_state(
-    info_a: Dict,
+    info_a: dict,
     obs: np.ndarray,
     grid_height: int,
     grid_width: int,
@@ -81,7 +81,12 @@ def _build_agent_state(
     active = bool(info_a.get("active", True))
     carrying = int(info_a.get("carrying", int(obs[0] > 0.5)))
     phase = int(info_a.get("phase", int(round(float(obs[1]) * 3))))
+    # Per-agent counter (added 2026-04: env.info["deliveries"]); falls back to
+    # the global `total_deliveries` for older runs.  See analysis.md §4 Bug 1.
+    deliveries = int(info_a.get("deliveries", info_a.get("total_deliveries", 0)))
     total_deliveries = int(info_a.get("total_deliveries", 0))
+    last_delivery_step = int(info_a.get("last_delivery_step", -1))
+    on_rendezvous = bool(info_a.get("on_rendezvous", False))
     stranded = bool(info_a.get("stranded", False))
     dragging = bool(info_a.get("dragging", False))
     rescue_target = info_a.get("rescue_target")
@@ -119,6 +124,9 @@ def _build_agent_state(
         battery_dead=battery_dead,
         failed=failed,
         total_deliveries=total_deliveries,
+        deliveries=deliveries,
+        last_delivery_step=last_delivery_step,
+        on_rendezvous=on_rendezvous,
         position=pos,
     )
 
@@ -153,14 +161,14 @@ class WarehouseEvalCollector:
         self.num_agents = num_agents
         self.max_cycles = max_cycles
         self.battery_capacity = battery_capacity
-        self._agents: List[str] = [f"agent_{i}" for i in range(num_agents)]
+        self._agents: list[str] = [f"agent_{i}" for i in range(num_agents)]
 
     def collect(
         self,
         env: Any,
         agent: Any,
         n_episodes: int = 20,
-        max_steps_per_episode: Optional[int] = None,
+        max_steps_per_episode: int | None = None,
     ) -> EvalData:
         """Run n_episodes evaluation episodes and return collected EvalData."""
         agent.set_running_mode("eval")
@@ -194,7 +202,7 @@ class WarehouseEvalCollector:
                     k: float(np.asarray(v).ravel()[0]) for k, v in rewards.items()
                 }
 
-                agent_states: Dict[str, AgentState] = {}
+                agent_states: dict[str, AgentState] = {}
                 for a in actual_agents:
                     a_info = next_info.get(a, {}) if next_info else {}
                     a_obs = _to_np(next_obs.get(a, obs.get(a, np.zeros(227))))
