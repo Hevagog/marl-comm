@@ -250,7 +250,10 @@ class VectorizedPettingZooEnv:
         obs_batched = self._batch_observations([r[0] for r in results])
         self._last_obs = obs_batched
 
-        infos_batched = {agent: {} for agent in self._possible_agents}
+        # Propagate infos from env 0 (representative for single-env; analysis always
+        # uses num_envs=1 so per-agent info dicts are valid here).
+        infos_list = [r[1] for r in results]
+        infos_batched = infos_list[0] if infos_list else {agent: {} for agent in self._possible_agents}
 
         self._needs_reset = [False] * self._num_envs
 
@@ -368,8 +371,10 @@ class VectorizedPettingZooEnv:
         # Cache observations
         self._last_obs = obs_batched
 
-        # Info batching (basic)
-        infos_batched = {agent: {} for agent in self._possible_agents}
+        # Propagate per-agent info from env 0.  Analysis runs use num_envs=1 so
+        # env 0 is the only environment; for multi-env training the info is
+        # ignored by trainers, but env 0 is still a valid representative.
+        infos_batched = infos_list[0] if infos_list else {agent: {} for agent in self._possible_agents}
 
         return (
             obs_batched,

@@ -139,13 +139,20 @@ class MAGICMAPPO(CategoricalMAPPO):
         uid0 = self.possible_agents[0]
         policy = self.policies[uid0]
 
-        # Stack observations from all agents: (num_agents * num_envs, obs_dim)
-        stacked_obs = jnp.concatenate(
-            [
-                self._state_preprocessor[uid](states[uid])
-                for uid in self.possible_agents
-            ],
-            axis=0,
+        # Stack observations env-major: (num_agents * num_envs, obs_dim)
+        # Layout: [a0_e0, a1_e0, ..., aN_e0, a0_e1, a1_e1, ..., aN_e(E-1)]
+        # This matches the interleaved groups produced by _shuffle_buffer_indices
+        # during training, so rollout log_probs align with training log_probs
+        # and IS ratios stay near 1.0.  With num_envs=1 both orderings are
+        # identical (no behavioural change).
+        preprocessed = [
+            self._state_preprocessor[uid](states[uid])
+            for uid in self.possible_agents
+        ]
+        # preprocessed[i]: (num_envs, obs_dim)
+        # stack → (num_envs, num_agents, obs_dim) → reshape → (num_envs*num_agents, obs_dim)
+        stacked_obs = jnp.stack(preprocessed, axis=1).reshape(
+            -1, preprocessed[0].shape[-1]
         )
 
         # Call shared policy once with all agents' observations.
@@ -158,16 +165,14 @@ class MAGICMAPPO(CategoricalMAPPO):
         )
 
         # Split results per agent.
-        # Each agent's slice is of shape (num_envs, ...), typically (1, ...).
+        # Env-major layout: rows i, i+n, i+2n, ... belong to agent i.
         n = len(self.possible_agents)
-        num_envs = actions_all.shape[0] // n
         actions: dict[str, jax.Array] = {}
         log_prob: dict[str, jax.Array] = {}
         outputs: dict[str, dict] = {}
         for i, uid in enumerate(self.possible_agents):
-            s = slice(i * num_envs, (i + 1) * num_envs)
-            actions[uid] = actions_all[s]
-            log_prob[uid] = log_prob_all[s]
+            actions[uid] = actions_all[i::n]
+            log_prob[uid] = log_prob_all[i::n]
             outputs[uid] = {}
             for k, v in outputs_all.items():
                 if k in _COMM_KEYS:
@@ -175,7 +180,7 @@ class MAGICMAPPO(CategoricalMAPPO):
                     # their shape is preserved for the analysis collector.
                     outputs[uid][k] = v
                 elif isinstance(v, (jnp.ndarray, np.ndarray, jax.Array)):
-                    outputs[uid][k] = v[s]
+                    outputs[uid][k] = v[i::n]
                 else:
                     outputs[uid][k] = v
 
