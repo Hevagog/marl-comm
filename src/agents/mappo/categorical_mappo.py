@@ -264,12 +264,19 @@ def _update_policy_fixed(
                 off_diag = jnp.ones((n, n), dtype=jnp.float32) - jnp.eye(
                     n, dtype=jnp.float32
                 )
-                num_off_diag = jnp.float32(n * n - n)
-                density = jnp.sum(adj * off_diag) / num_off_diag
+                # Total number of off-diagonal slots across all rounds/groups.
+                # adj.size / N^2 == R * groups, so total = (R*groups) * (N^2-N).
+                total_off_diag = jnp.float32(adj.size) * (
+                    jnp.float32(n * n - n) / jnp.float32(n * n)
+                )
+                density = jnp.sum(adj * off_diag) / total_off_diag
+                # Clip into [eps, 1-eps] to keep both log(density) and
+                # log(1-density) finite even at exact 0/1 saturation.
                 eps = jnp.float32(1e-6)
+                density = jnp.clip(density, eps, 1.0 - eps)
                 h = -(
-                    density * jnp.log(density + eps)
-                    + (1.0 - density) * jnp.log(1.0 - density + eps)
+                    density * jnp.log(density)
+                    + (1.0 - density) * jnp.log(1.0 - density)
                 )
                 total_loss = total_loss - jnp.float32(comm_reg_scale) * h
 
@@ -825,7 +832,10 @@ class CategoricalMAPPO(MAPPO):
                     cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
                 if apply_kl_stop and (
-                    (self._kl_threshold[uid0] and kl_divergence > self._kl_threshold[uid0])
+                    (
+                        self._kl_threshold[uid0]
+                        and kl_divergence > self._kl_threshold[uid0]
+                    )
                     or (
                         ratio_max_threshold is not None
                         and float(diag["ratio_max_abs_dev"]) > ratio_max_threshold
@@ -984,7 +994,10 @@ class CategoricalMAPPO(MAPPO):
                         cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)
 
                     if apply_kl_stop and (
-                        (self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid])
+                        (
+                            self._kl_threshold[uid]
+                            and kl_divergence > self._kl_threshold[uid]
+                        )
                         or (
                             ratio_max_threshold is not None
                             and float(diag["ratio_max_abs_dev"]) > ratio_max_threshold
