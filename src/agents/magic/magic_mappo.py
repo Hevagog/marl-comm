@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Mapping
+from typing import Any
 
 import flax.linen as nn
 import jax
@@ -10,6 +11,11 @@ import numpy as np
 
 from agents.mappo import CategoricalMAPPO
 from agents.magic.models.policy import _CommunicateBlock
+from agents.magic.models.recurrent import (
+    carry_batch_size,
+    reset_carry_where,
+    zero_carry,
+)
 from skrl.models.jax.categorical import _categorical
 
 
@@ -89,6 +95,41 @@ class MAGICMAPPO(CategoricalMAPPO):
         self._cached_comm_module: nn.Module | None = None
         self._jit_comm_apply = None
 
+        # Recurrent (LSTM/GRU) hidden-state buffer for MAGIC §4.1 Eq. 3.
+        # Maintained per agent so heterogeneous and homogeneous paths share
+        # the same plumbing. Lazily allocated on first `act()` call once we
+        # know `num_envs` from the obs batch shape.
+        # `None` if `cfg.magic.recurrent_type` is not set.
+        uid0 = self.possible_agents[0]
+        policy0 = self.policies[uid0]
+        self._recurrent_type: str | None = getattr(policy0, "recurrent_type", None)
+        # For LSTM/GRU this equals recurrent_hidden_size; for "hopfield" it is
+        # T*H (rolling buffer flattened) — see MAGICPolicyNet.recurrent_carry_size.
+        self._recurrent_hidden_size: int = int(
+            getattr(
+                policy0,
+                "recurrent_carry_size",
+                getattr(policy0, "recurrent_hidden_size", 0),
+            )
+        )
+        # Live carry — propagated step-to-step at rollout, reset on done.
+        self._hidden_state: dict[str, Any] = {}
+
+        # TBPTT(1) side-buffer: stores the *input* carry h_{t-1} that the
+        # cell consumed at slot t (alongside obs_t, action_t in skrl Memory).
+        # Layout per agent:  GRU -> {"h": (memory_size, num_envs, hidden)},
+        #                    LSTM -> {"c": ..., "h": ...}. Pool/concat across
+        # agents during PPO update to mirror the standard tensor layout.
+        self._rec_buffer: dict[str, dict[str, jax.Array]] = {}
+        # Per-step write head, mirrors skrl Memory's index. Wraps at
+        # `memory_size` exactly the same way (skrl `RandomMemory` uses a
+        # ring buffer over `memory_size` slots).
+        self._rec_step: int = 0
+        # Snapshot of the carry that went *into* the cell at the current
+        # rollout step. Set in `_act_homogeneous` immediately before
+        # `policy.act()` so `record_transition` can persist it.
+        self._current_input_carry: dict[str, Any] = {}
+
     def act(
         self,
         states: Mapping[str, np.ndarray | jax.Array],
@@ -146,8 +187,7 @@ class MAGICMAPPO(CategoricalMAPPO):
         # and IS ratios stay near 1.0.  With num_envs=1 both orderings are
         # identical (no behavioural change).
         preprocessed = [
-            self._state_preprocessor[uid](states[uid])
-            for uid in self.possible_agents
+            self._state_preprocessor[uid](states[uid]) for uid in self.possible_agents
         ]
         # preprocessed[i]: (num_envs, obs_dim)
         # stack → (num_envs, num_agents, obs_dim) → reshape → (num_envs*num_agents, obs_dim)
@@ -159,10 +199,35 @@ class MAGICMAPPO(CategoricalMAPPO):
         # MAGICPolicyNet.act injects the Gumbel RNG automatically.
         # gumbel_temperature_override passes the annealed temperature without
         # triggering JIT recompilation (consumed as a traced JAX scalar in __call__).
+        num_envs = preprocessed[0].shape[0]
+        policy_inputs: dict[str, Any] = {
+            "states": stacked_obs,
+            "gumbel_temperature_override": current_temp,
+        }
+        if self._recurrent_type is not None:
+            # Stack per-agent hidden state env-major to match `stacked_obs`
+            # layout: (num_envs * num_agents, hidden_size). The agent index
+            # is the inner dim, so row k = env * N + agent corresponds to
+            # the obs at the same row.
+            stacked_state = self._stack_hidden_state(num_envs)
+            policy_inputs["recurrent_state"] = stacked_state
+            # Snapshot the carry that *enters* the cell at this step. This
+            # is the value we will store in the side-buffer in
+            # `record_transition` and feed back during PPO update so the
+            # IS ratio at training matches the rollout. Per agent: same
+            # shape as live `self._hidden_state[uid]`.
+            self._current_input_carry = {
+                uid: self._clone_carry(self._hidden_state[uid])
+                for uid in self.possible_agents
+            }
+
         actions_all, log_prob_all, outputs_all = policy.act(
-            {"states": stacked_obs, "gumbel_temperature_override": current_temp},
+            policy_inputs,
             role="policy",
         )
+
+        if self._recurrent_type is not None and "recurrent_state_new" in outputs_all:
+            self._unstack_hidden_state(outputs_all["recurrent_state_new"], num_envs)
 
         # Split results per agent.
         # Env-major layout: rows i, i+n, i+2n, ... belong to agent i.
@@ -358,6 +423,182 @@ class MAGICMAPPO(CategoricalMAPPO):
 
         self._current_log_prob = log_prob
         return actions, log_prob, outputs
+
+    # ------------------------------------------------------------------
+    # Recurrent (LSTM/GRU) hidden-state plumbing.
+    #
+    # The state is laid out env-major to mirror `_act_homogeneous`'s
+    # `stacked_obs` reshape:
+    #     stacked_obs.row[k] ↔ env e=k//N, agent a=k%N
+    # Per-agent state buffer is `(num_envs, hidden_size)` (or a tuple for
+    # LSTM); stacking produces `(num_envs * num_agents, hidden_size)`.
+    # ------------------------------------------------------------------
+
+    def _ensure_hidden_state(self, num_envs: int) -> None:
+        """Allocate zero hidden state on first use or when num_envs changes."""
+        if self._recurrent_type is None:
+            return
+        for uid in self.possible_agents:
+            existing = self._hidden_state.get(uid)
+            if existing is None or carry_batch_size(existing) != num_envs:
+                self._hidden_state[uid] = zero_carry(
+                    self._recurrent_type, num_envs, self._recurrent_hidden_size
+                )
+
+    def _stack_hidden_state(self, num_envs: int) -> Any:
+        """Stack per-agent state env-major: (E, N, H) → (E*N, H)."""
+        self._ensure_hidden_state(num_envs)
+        per_agent = [self._hidden_state[uid] for uid in self.possible_agents]
+        if self._recurrent_type == "lstm":
+            cs = jnp.stack([s[0] for s in per_agent], axis=1).reshape(
+                num_envs * len(self.possible_agents), -1
+            )
+            hs = jnp.stack([s[1] for s in per_agent], axis=1).reshape(
+                num_envs * len(self.possible_agents), -1
+            )
+            return (cs, hs)
+        # GRU
+        return jnp.stack(per_agent, axis=1).reshape(
+            num_envs * len(self.possible_agents), -1
+        )
+
+    def _unstack_hidden_state(self, stacked: Any, num_envs: int) -> None:
+        """Inverse of `_stack_hidden_state`; writes back to `self._hidden_state`."""
+        n = len(self.possible_agents)
+        if self._recurrent_type == "lstm":
+            cs, hs = stacked
+            cs = cs.reshape(num_envs, n, -1)
+            hs = hs.reshape(num_envs, n, -1)
+            for i, uid in enumerate(self.possible_agents):
+                self._hidden_state[uid] = (cs[:, i, :], hs[:, i, :])
+        else:
+            stacked = stacked.reshape(num_envs, n, -1)
+            for i, uid in enumerate(self.possible_agents):
+                self._hidden_state[uid] = stacked[:, i, :]
+
+    @staticmethod
+    def _clone_carry(carry: Any) -> Any:
+        """JAX arrays are immutable; this is a no-op alias used to make the
+        snapshot intent explicit in `_act_homogeneous`."""
+        return carry
+
+    def _ensure_rec_buffer(self, num_envs: int) -> None:
+        """Allocate the TBPTT(1) side-buffer once we know `num_envs`."""
+        if self._recurrent_type is None or self._rec_buffer:
+            return
+        memory_size = int(self.memories[self.possible_agents[0]].memory_size)
+        H = self._recurrent_hidden_size
+        for uid in self.possible_agents:
+            if self._recurrent_type == "lstm":
+                self._rec_buffer[uid] = {
+                    "c": jnp.zeros((memory_size, num_envs, H), dtype=jnp.float32),
+                    "h": jnp.zeros((memory_size, num_envs, H), dtype=jnp.float32),
+                }
+            else:
+                self._rec_buffer[uid] = {
+                    "h": jnp.zeros((memory_size, num_envs, H), dtype=jnp.float32),
+                }
+
+    def _store_input_carry(self) -> None:
+        """Write the snapshotted *input* carry into slot `_rec_step` for each
+        agent and advance the write head with skrl's ring-buffer wrap.
+        """
+        if self._recurrent_type is None or not self._current_input_carry:
+            return
+        uid0 = self.possible_agents[0]
+        carry0 = self._current_input_carry[uid0]
+        num_envs = carry_batch_size(carry0)
+        self._ensure_rec_buffer(num_envs)
+        memory_size = int(self.memories[uid0].memory_size)
+        slot = self._rec_step % memory_size
+        for uid in self.possible_agents:
+            carry = self._current_input_carry[uid]
+            buf = self._rec_buffer[uid]
+            if self._recurrent_type == "lstm":
+                c, h = carry
+                buf["c"] = buf["c"].at[slot].set(c)
+                buf["h"] = buf["h"].at[slot].set(h)
+            else:
+                buf["h"] = buf["h"].at[slot].set(carry)
+        self._rec_step += 1
+
+    def _sample_recurrent_minibatch(self, idx: np.ndarray) -> Any:
+        """Slice the pooled side-buffer with the same `idx` the policy uses.
+
+        Pool layout matches `_update_shared_policy`'s tensor pool: each
+        agent contributes `(memory_size * num_envs, hidden)` rows in order
+        `[agent_0, agent_1, ..., agent_{N-1}]`. The interleaving applied by
+        `_shuffle_buffer_indices` is purely on `idx`, so identical slicing
+        gives the carry that matches each obs/action row.
+        """
+        if self._recurrent_type is None or not self._rec_buffer:
+            return None
+        per_agent_h = []
+        per_agent_c = []
+        for uid in self.possible_agents:
+            buf = self._rec_buffer[uid]
+            h = buf["h"].reshape(-1, buf["h"].shape[-1])  # (M*E, H)
+            per_agent_h.append(h)
+            if self._recurrent_type == "lstm":
+                c = buf["c"].reshape(-1, buf["c"].shape[-1])
+                per_agent_c.append(c)
+        pooled_h = jnp.concatenate(per_agent_h, axis=0)
+        if self._recurrent_type == "lstm":
+            pooled_c = jnp.concatenate(per_agent_c, axis=0)
+            return (pooled_c[idx], pooled_h[idx])
+        return pooled_h[idx]
+
+    def _reset_hidden_state(self, dones_per_agent: dict[str, jax.Array]) -> None:
+        """Zero rows of the hidden state where the env terminated/truncated.
+
+        Called from `record_transition`. Mirrors the standard PyTorch
+        ppo_rnn convention of resetting carries on episode boundaries
+        (skrl-torch `ppo_rnn._update`).
+        """
+        if self._recurrent_type is None or not self._hidden_state:
+            return
+        for uid in self.possible_agents:
+            mask = dones_per_agent.get(uid)
+            if mask is None:
+                continue
+            mask = jnp.asarray(mask).reshape(-1).astype(bool)
+            self._hidden_state[uid] = reset_carry_where(self._hidden_state[uid], mask)
+
+    def record_transition(
+        self,
+        states,
+        actions,
+        rewards,
+        next_states,
+        terminated,
+        truncated,
+        infos,
+        timestep,
+        timesteps,
+    ):
+        super().record_transition(
+            states,
+            actions,
+            rewards,
+            next_states,
+            terminated,
+            truncated,
+            infos,
+            timestep,
+            timesteps,
+        )
+        if self._recurrent_type is not None:
+            # 1) Persist h_{t-1} (the carry that just produced this action)
+            #    into the side-buffer before we reset on dones. Order
+            #    matters: the reset wipes `_hidden_state` for *next* step;
+            #    `_current_input_carry` was already snapshotted in
+            #    `_act_homogeneous` and remains untouched.
+            self._store_input_carry()
+            dones = {
+                uid: jnp.asarray(terminated[uid]) | jnp.asarray(truncated[uid])
+                for uid in self.possible_agents
+            }
+            self._reset_hidden_state(dones)
 
     def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
         """Shuffle indices for one training epoch.

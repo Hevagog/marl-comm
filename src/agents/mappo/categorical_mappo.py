@@ -188,6 +188,7 @@ def _update_policy_fixed(
     debug_entropy,
     comm_reg_scale=0.0,
     diversity_loss_scale=0.0,
+    sampled_recurrent_state=None,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
 
@@ -216,8 +217,13 @@ def _update_policy_fixed(
     use_diversity_reg = diversity_loss_scale > 0.0
 
     def _policy_loss(params):
+        _inputs = {"states": sampled_states, "taken_actions": sampled_actions}
+        #  Matches skrl-torch ppo_rnn. Patch to the skrl since it does not support
+        # LSTM and GRU for JAX
+        if sampled_recurrent_state is not None:
+            _inputs["recurrent_state"] = jax.lax.stop_gradient(sampled_recurrent_state)
         _, next_log_prob, outputs = policy_act(
-            {"states": sampled_states, "taken_actions": sampled_actions},
+            _inputs,
             "policy",
             params,
         )
@@ -807,6 +813,14 @@ class CategoricalMAPPO(MAPPO):
                     sampled_returns,
                     sampled_advantages,
                 ) = (t[idx] for t in pooled_list)
+                # Optional recurrent-state minibatch (MAGICMAPPO LSTM/GRU
+                # path). Subclasses set `_sample_recurrent_minibatch` to
+                # return the stored carry sliced by `idx`; default Dense
+                # path leaves it None and behavior is unchanged.
+                sampled_recurrent_state = None
+                _sample_rec = getattr(self, "_sample_recurrent_minibatch", None)
+                if _sample_rec is not None:
+                    sampled_recurrent_state = _sample_rec(idx)
                 # --- Policy update ---
                 (
                     grad,
@@ -827,6 +841,7 @@ class CategoricalMAPPO(MAPPO):
                     self.cfg.get("debug_entropy_stats", False),
                     self.cfg.get("comm_reg_scale", 0.0),
                     self.cfg.get("diversity_loss_scale", 0.0),
+                    sampled_recurrent_state=sampled_recurrent_state,
                 )
                 for k, v in diag.items():
                     cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)

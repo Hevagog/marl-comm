@@ -436,6 +436,178 @@ class BaseRunner(ABC):
         else:
             print("Warning: no frames were captured (env.render() returned None).")
 
+    def record_comm(self, checkpoint_path: str | None = None) -> None:
+        """Record an episode video with a communication graph overlay (split-screen).
+
+        Produces a side-by-side video: left panel = environment render,
+        right panel = live communication graph (directed graph with soft edge
+        weights for MAGIC, static graph + dynamic representations for CommFormer).
+
+        Supported agent types: ``magic``, ``magic_hopfield``, ``commformer``,
+        ``commformerhm``.  Falls back to plain ``record()`` for other types.
+        """
+        import numpy as np
+        import imageio  # type: ignore[import-untyped]
+
+        from utils.comm_graph_renderer import render_comm_graph_frame, make_split_frame
+
+        path = checkpoint_path or self._cfg["record"]["checkpoint_path"]
+        if path:
+            self._load_checkpoint(path)
+
+        record_cfg = self._cfg["record"]
+        max_steps: int = record_cfg["timesteps"]
+        fps: int = record_cfg["fps"]
+        video_dir = Path(record_cfg["video_dir"])
+        video_dir.mkdir(parents=True, exist_ok=True)
+        exp_name: str = self._cfg["experiment"]["name"]
+        out_path = video_dir / f"{exp_name}_comm.mp4"
+
+        agent_type: str = self._cfg.get("experiment", {}).get("agent_type", "mappo")
+        num_agents: int = len(self._env.possible_agents)
+        agent_labels = [f"A{i}" for i in range(num_agents)]
+
+        # Determine which output key holds adjacency data
+        is_magic = agent_type in ("magic", "magic_hopfield")
+        is_commformer = agent_type in ("commformer", "commformerhm")
+
+        def _np(v):
+            try:
+                import jax
+                return np.asarray(jax.device_get(v))
+            except Exception:
+                return np.asarray(v)
+
+        def _extract_adj(outputs_per_agent):
+            """Return (adj: np.ndarray (N,N), node_features: np.ndarray|None)."""
+            uid0 = self._env.possible_agents[0]
+            out0 = outputs_per_agent.get(uid0, {})
+
+            adj = None
+            node_features = None
+
+            if "adj_matrices" in out0:
+                raw = _np(out0["adj_matrices"])
+                # MAGIC: (R, num_envs, N, N) — use last round [-1], first env [0]
+                # CommFormer: (N, N) — static learned adjacency
+                if raw.ndim == 4:
+                    # shape[0]=R, shape[1]=num_envs  →  last round, first env
+                    adj = raw[-1, 0]
+                elif raw.ndim == 3:
+                    adj = raw[-1]  # (R, N, N) → last round
+                elif raw.ndim == 2:
+                    adj = raw
+
+            elif "hard_adj" in out0:
+                raw = _np(out0["hard_adj"])
+                adj = raw[0] if raw.ndim > 2 else raw
+
+            # Node features: prefer agg_messages (MAGIC) or encoder_out (CF)
+            if "agg_messages" in out0:
+                raw = _np(out0["agg_messages"])
+                node_features = raw[0] if raw.ndim == 3 else raw
+            elif "messages" in out0:
+                raw = _np(out0["messages"])
+                node_features = raw[0] if raw.ndim == 3 else raw
+            else:
+                # CommFormer: collect per-agent encoder_out
+                rows = []
+                for uid in self._env.possible_agents:
+                    ag_out = outputs_per_agent.get(uid, {})
+                    if "encoder_out" in ag_out:
+                        r = _np(ag_out["encoder_out"])
+                        rows.append(r[0] if r.ndim == 2 else r)
+                if len(rows) == num_agents:
+                    node_features = np.stack(rows, axis=0)
+
+            if adj is None:
+                adj = np.zeros((num_agents, num_agents), dtype=np.float32)
+
+            return adj, node_features
+
+        battery_capacity: float = float(
+            self._cfg.get("env", {}).get("battery_capacity", 0)
+        )
+
+        def _extract_agent_state(info: Any) -> tuple[list[float] | None, list[bool]]:
+            """Pull battery fractions and dead flags from the step info dict."""
+            has_battery = battery_capacity > 0
+            levels: list[float] | None = [] if has_battery else None
+            dead: list[bool] = []
+            for uid in self._env.possible_agents:
+                ag_info = info.get(uid, {}) if isinstance(info, dict) else {}
+                if has_battery and levels is not None:
+                    bat = ag_info.get("battery", battery_capacity)
+                    levels.append(float(bat) / battery_capacity)
+                dead.append(bool(ag_info.get("battery_dead", False)))
+            return levels, dead
+
+        self._agent.set_running_mode("eval")
+        frames: list[np.ndarray] = []
+
+        obs, _ = self._env.reset()
+        env_frame = self._env.render()
+        panel_h = env_frame.shape[0] if env_frame is not None else 480
+        panel_w = panel_h  # square comm panel
+
+        title = "MAGIC — Communication Graph" if is_magic else "CommFormer — Communication Graph"
+
+        for step in range(max_steps):
+            actions, _, outputs_per_agent = self._agent.act(
+                obs, timestep=step, timesteps=max_steps
+            )
+            obs, _, terminated, truncated, info = self._env.step(actions)
+
+            env_frame = self._env.render()
+            if env_frame is None:
+                env_frame = np.zeros((panel_h, panel_h, 3), dtype=np.uint8)
+            else:
+                panel_h = env_frame.shape[0]
+
+            adj, node_features = _extract_adj(outputs_per_agent)
+            battery_levels, agent_dead = _extract_agent_state(info)
+
+            comm_frame = render_comm_graph_frame(
+                adj=adj,
+                title=title,
+                step=step,
+                agent_labels=agent_labels,
+                node_features=node_features,
+                battery_levels=battery_levels,
+                agent_dead=agent_dead,
+                width_px=panel_w,
+                height_px=panel_h,
+                is_dynamic=is_magic,
+            )
+
+            combined = make_split_frame(env_frame, comm_frame)
+            frames.append(combined)
+
+            is_done = all(
+                terminated.get(a, False) or truncated.get(a, False)
+                for a in terminated.keys()
+            )
+            if is_done:
+                obs, _ = self._env.reset()
+                env_frame = self._env.render()
+                if env_frame is not None:
+                    comm_frame = render_comm_graph_frame(
+                        adj=np.zeros((num_agents, num_agents)),
+                        title=title + " [reset]",
+                        step=step,
+                        agent_labels=agent_labels,
+                        width_px=panel_w,
+                        height_px=panel_h,
+                        is_dynamic=is_magic,
+                    )
+                    frames.append(make_split_frame(env_frame, comm_frame))
+
+        if frames:
+            imageio.mimwrite(str(out_path), frames, fps=fps)
+            print(f"Communication recording saved to {out_path}")
+        else:
+            print("Warning: no frames captured.")
+
     def analyze(
         self,
         checkpoint_path: str | None = None,
@@ -648,7 +820,7 @@ class BaseRunner(ABC):
                 )
                 exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
                 save_all_magic_warehouse_figures(
-                    data, output_dir=f"{output_dir}/magic", prefix=exp_name
+                    data, output_dir=f"{output_dir}/{exp_name}/magic", prefix=exp_name
                 )
             collector = WarehouseEvalCollector(
                 num_agents=env_cfg.get("num_agents", 4),
@@ -658,7 +830,7 @@ class BaseRunner(ABC):
                 env=self._env, agent=self._agent, n_episodes=n_episodes
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_warehouse_figures(data, output_dir=output_dir, prefix=exp_name)
+            save_all_warehouse_figures(data, output_dir=f"{output_dir}/{exp_name}", prefix=exp_name)
 
         else:
             from utils import EvalCollector, save_all_figures

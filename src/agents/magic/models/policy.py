@@ -12,6 +12,30 @@ from skrl.models.jax import CategoricalMixin, Model
 from skrl.models.jax.categorical import _categorical
 
 from agents.magic.models.comm_layers import MessageProcessor, Scheduler
+from agents.magic.models.recurrent import RecurrentEncoder, zero_carry
+
+
+def _broadcast_carry_to_batch(carry, batch_size: int):
+    """Tile a carry's leading axis up to ``batch_size`` (no-op if already there).
+
+    Lets callers pass a single-batch carry that the policy then repeats over
+    its full forward batch — useful for tests and for the init pass where
+    `MAGICMAPPO` hasn't been instantiated yet.
+    """
+
+    def fix(x):
+        if x.shape[0] == batch_size:
+            return x
+        if x.shape[0] == 1:
+            return jnp.broadcast_to(x, (batch_size,) + x.shape[1:])
+        # Generic mismatch: replace with zeros — this protects against
+        # stale carries from a different batch size showing up at init.
+        return jnp.zeros((batch_size,) + x.shape[1:], dtype=x.dtype)
+
+    if isinstance(carry, tuple):
+        return tuple(fix(t) for t in carry)
+    return fix(carry)
+
 
 # Orthogonal init gains (following MAPPO paper, Yu et al. 2021)
 _HIDDEN_GAIN = jnp.sqrt(2.0)
@@ -41,13 +65,20 @@ class _CommunicateBlock(nn.Module):
         msg_group: jax.Array,  # (N, message_dim)
         rng: jax.Array | None = None,
         temperature_override: jax.Array | None = None,
+        gumbel_scale: jax.Array | float = 1.0,
     ) -> tuple[jax.Array, jax.Array]:  # (processed, adjs)
         adjs_raw = Scheduler(
             hidden_dim=self.message_dim,
             num_rounds=self.num_comm_rounds,
             temperature=self.gumbel_temperature,
             name="scheduler",
-        )(msg_group, rng=rng, hard=True, temperature_override=temperature_override)
+        )(
+            msg_group,
+            rng=rng,
+            hard=True,
+            temperature_override=temperature_override,
+            gumbel_scale=gumbel_scale,
+        )
 
         # Scheduler may return either:
         #   (a) a stacked JAX array of shape (num_rounds, N, N), or
@@ -112,6 +143,11 @@ class MAGICPolicyNet(CategoricalMixin, Model):
     num_heads: int = 1
     gumbel_temperature: float = 1.0
     num_agents: int = 2
+    recurrent_type: str | None = None
+    recurrent_hidden_size: int = 64
+    episodic_buffer_size: int = 8
+    episodic_beta_init: float = 1.0
+    episodic_gate_init: float = 0.0
 
     def __init__(
         self,
@@ -124,6 +160,11 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         gumbel_temperature: float = 1.0,
         num_agents: int = 2,
         unnormalized_log_prob: bool = True,
+        recurrent_type: str | None = None,
+        recurrent_hidden_size: int = 64,
+        episodic_buffer_size: int = 8,
+        episodic_beta_init: float = 1.0,
+        episodic_gate_init: float = 0.0,
         device=None,
         **kwargs: Any,
     ):
@@ -135,6 +176,31 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "num_heads", int(num_heads))
         object.__setattr__(self, "gumbel_temperature", float(gumbel_temperature))
         object.__setattr__(self, "num_agents", int(num_agents))
+        rt = recurrent_type
+        if isinstance(rt, str):
+            rt = rt.lower()
+            if rt in ("none", ""):
+                rt = None
+        if rt is not None and rt not in ("lstm", "gru", "hopfield"):
+            raise ValueError(
+                f"recurrent_type must be None, 'lstm', 'gru', or 'hopfield'; got {recurrent_type!r}"
+            )
+        object.__setattr__(self, "recurrent_type", rt)
+        object.__setattr__(self, "recurrent_hidden_size", int(recurrent_hidden_size))
+        object.__setattr__(self, "episodic_buffer_size", int(episodic_buffer_size))
+        object.__setattr__(self, "episodic_beta_init", float(episodic_beta_init))
+        object.__setattr__(self, "episodic_gate_init", float(episodic_gate_init))
+
+    @property
+    def recurrent_carry_size(self) -> int:
+        """Flat carry width consumed by the side-buffer.
+
+        ``hidden_size`` for LSTM/GRU; ``buffer_size * hidden_size`` for the
+        episodic Hopfield encoder (rolling buffer flattened).
+        """
+        if self.recurrent_type == "hopfield":
+            return int(self.episodic_buffer_size) * int(self.recurrent_hidden_size)
+        return int(self.recurrent_hidden_size)
 
     @nn.compact
     def __call__(
@@ -187,8 +253,15 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             if temperature_override is not None
             else jnp.asarray(self.gumbel_temperature, dtype=jnp.float32)
         )
+        # IS-ratio fix (ported from magic_hopfield variant): zero Gumbel
+        # noise when computing log_probs at PPO update time so the rollout
+        # and training adjacency samples coincide.
+        training_mode = inputs.get("taken_actions", None) is not None
+        _gumbel_scale = jnp.asarray(
+            0.0 if training_mode else 1.0, dtype=jnp.float32
+        )
 
-        # Observation encoder
+        # Observation encoder e(o_i^t) — FC + tanh per MAGIC §4.1
         obs_enc = nn.Dense(
             self.hidden_sizes[0],
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
@@ -197,7 +270,35 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         )(x)
         obs_enc = nn.tanh(obs_enc)  # (B, H)
 
-        # Message encoder
+        # Optional recurrent cell (MAGIC §4.1 Eq. 3):
+        #   h_i^t, c_i^t = LSTM(e(o_i^t), h_i^{t-1}, c_i^{t-1})
+        # Hidden state is supplied by `MAGICMAPPO` via `inputs["recurrent_state"]`
+        # during rollout (stateful across calls, reset on dones). When absent
+        # (e.g. during PPO update from skrl `RandomMemory`, init pass, or any
+        # caller that doesn't carry state) we fall back to a zero carry
+        new_recurrent_state = None
+        if self.recurrent_type is not None:
+            carry_width = (
+                int(self.episodic_buffer_size) * int(self.recurrent_hidden_size)
+                if self.recurrent_type == "hopfield"
+                else int(self.recurrent_hidden_size)
+            )
+            in_carry = inputs.get("recurrent_state", None)
+            if in_carry is None:
+                in_carry = zero_carry(self.recurrent_type, b, carry_width)
+            in_carry = _broadcast_carry_to_batch(in_carry, b)
+            new_carry, h_t = RecurrentEncoder(
+                hidden_size=self.recurrent_hidden_size,
+                recurrent_type=self.recurrent_type,
+                buffer_size=int(self.episodic_buffer_size),
+                beta_init=float(self.episodic_beta_init),
+                gate_init=float(self.episodic_gate_init),
+                name="recurrent",
+            )(in_carry, obs_enc)
+            obs_enc = h_t  # downstream uses the encoder output
+            new_recurrent_state = new_carry
+
+        # Message encoder e_m(h_i^t) → m_i^{t(0)}
         messages = nn.Dense(
             self.message_dim,
             kernel_init=nn.initializers.orthogonal(scale=_HIDDEN_GAIN),
@@ -228,7 +329,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov))
+            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov), jnp.full((1,), _gumbel_scale))
             # Also touch msg_decoder and action_fc layers.
             _dummy_proc = jnp.zeros((b, self.message_dim))
             _dummy_dec = nn.Dense(
@@ -294,7 +395,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov))
+            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov), jnp.full((1,), _gumbel_scale))
         else:
             comm_active = (b >= n) and (b % n == 0)
             groups = b // n if comm_active else 1
@@ -322,7 +423,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                     gumbel_temperature=self.gumbel_temperature,
                     num_heads=self.num_heads,
                     name="comm_block",
-                )(msg_grouped, group_keys, jnp.full((groups,), _temp_ov))
+                )(msg_grouped, group_keys, jnp.full((groups,), _temp_ov), jnp.full((groups,), _gumbel_scale))
                 # processed_grouped : (groups, N, message_dim)
                 # adjs_grouped      : (groups, num_rounds, N, N)
 
@@ -382,6 +483,8 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             "messages": raw_msg,  # (groups, N, message_dim)
             "agg_messages": agg_messages,  # (groups, N, message_dim)
         }
+        if new_recurrent_state is not None:
+            comm_outputs["recurrent_state_new"] = new_recurrent_state
 
         return logits, comm_outputs
 

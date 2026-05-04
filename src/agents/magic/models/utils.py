@@ -10,6 +10,7 @@ def gumbel_softmax(
     rng: jax.Array | None,
     temperature: float | jax.Array = 1.0,
     hard: bool = True,
+    gumbel_scale: float | jax.Array = 1.0,
 ) -> jax.Array:
     """Gumbel-Softmax with optional straight-through gradient estimator.
 
@@ -20,11 +21,20 @@ def gumbel_softmax(
     ``stop_gradient`` is applied so temperature is treated as a hyperparameter
     (no gradient flows through it) while still being a traced value (enabling
     dynamic annealing without JIT recompilation).
+
+    ``gumbel_scale`` (Hu et al. 2024 ICLR §4.2 trick, ported from the
+    `magic_hopfield` variant) scales the additive Gumbel noise. 1.0 = standard
+    stochastic sampling (rollout). 0.0 = deterministic argmax of logits while
+    keeping the STE topology — used during PPO updates to align rollout and
+    training adjacency samples and so keep the importance ratio at 1.0 at the
+    start of each epoch (avoids the IS-mismatch documented in
+    memory/warehouse_scaled_analysis_2026_05_04.md §4.1).
     """
     temp = jax.lax.stop_gradient(jnp.asarray(temperature, dtype=jnp.float32))
+    scale = jax.lax.stop_gradient(jnp.asarray(gumbel_scale, dtype=jnp.float32))
     if rng is not None:
         gumbels = jax.random.gumbel(rng, shape=logits.shape)
-        y = (logits + gumbels) / temp
+        y = (logits + scale * gumbels) / temp
     else:
         y = logits / temp
 

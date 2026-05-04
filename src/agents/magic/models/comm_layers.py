@@ -113,6 +113,7 @@ class SubScheduler(nn.Module):
         rng: jax.Array | None = None,
         hard: bool = True,
         temperature_override: jax.Array | None = None,
+        gumbel_scale: jax.Array | float = 1.0,
     ) -> tuple[jax.Array, jax.Array]:
         """
         Parameters
@@ -157,7 +158,13 @@ class SubScheduler(nn.Module):
             if temperature_override is not None
             else self.temperature
         )
-        adj = gumbel_softmax(logits, rng=rng, temperature=temperature, hard=hard)
+        adj = gumbel_softmax(
+            logits,
+            rng=rng,
+            temperature=temperature,
+            hard=hard,
+            gumbel_scale=gumbel_scale,
+        )
         # Take the "edge present" channel  (index 1)
         adj = adj[..., 1]  # (N, N)
 
@@ -185,6 +192,7 @@ class Scheduler(nn.Module):
         rng: jax.Array | None = None,
         hard: bool = True,
         temperature_override: jax.Array | None = None,
+        gumbel_scale: jax.Array | float = 1.0,
     ) -> list[jax.Array]:
         adjs: list[jax.Array] = []
         for round in range(self.num_rounds):
@@ -203,6 +211,7 @@ class Scheduler(nn.Module):
                 rng=sub_rng,
                 hard=hard,
                 temperature_override=temperature_override,
+                gumbel_scale=gumbel_scale,
             )
             adjs.append(adj)
         return adjs

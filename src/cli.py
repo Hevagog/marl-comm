@@ -65,9 +65,17 @@ def _get_runner(agent_type: str):
         from agents.mat.train import MATRunner
 
         return MATRunner
+    if agent_type == "mappo_hopfield":
+        from agents.mappo_hopfield.train import MAPPOHopfieldRunner
+
+        return MAPPOHopfieldRunner
+    if agent_type == "magic_hopfield":
+        from agents.magic_hopfield.train import MAGICHopfieldRunner
+
+        return MAGICHopfieldRunner
     raise ValueError(
         f"Unknown agent_type '{agent_type}'. Registered types: "
-        f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder', 'syncmixer', 'mat']}"
+        f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder', 'syncmixer', 'mat', 'mappo_hopfield', 'magic_hopfield']}"
     )
 
 
@@ -193,7 +201,7 @@ def main() -> None:
         "--task",
         type=str,
         required=True,
-        choices=["train", "eval", "record", "analyze"],
+        choices=["train", "record", "analyze"],
     )
     parser.add_argument(
         "--checkpoint",
@@ -212,6 +220,22 @@ def main() -> None:
             "1000000).  Only valid with --task train."
         ),
     )
+    parser.add_argument(
+        "--aout",
+        type=str,
+        default="eval_plots",
+    )
+    parser.add_argument(
+        "--record-comm",
+        action="store_true",
+        default=False,
+        help=(
+            "When used with --task record, produce a split-screen video: "
+            "left panel = environment render, right panel = live communication "
+            "graph (MAGIC/CommFormer only). Falls back to plain record for "
+            "unsupported agent types."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -222,7 +246,7 @@ def main() -> None:
     sys.path.insert(0, str(config_path.parent))
     cfg = load_config(config_path)
 
-    if args.task in ["eval", "record", "analyze"]:
+    if args.task in ["record", "analyze"]:
         num_envs = 1
         cfg["experiment"]["wandb"] = False
     else:
@@ -232,9 +256,7 @@ def main() -> None:
         cfg["env"] = {}
     cfg["env"]["num_envs"] = num_envs
 
-    mode: Literal["human", "rgb_array"] | None = (
-        "human" if args.task == "eval" else "rgb_array"
-    )
+    mode: Literal["human", "rgb_array"] | None = "rgb_array"
     if args.task == "train" and num_envs > 1:
         mode = None
 
@@ -258,12 +280,13 @@ def main() -> None:
     task: str = args.task
     if task == "train":
         runner.train(resume_from=args.resume)
-    elif task == "eval":
-        runner.eval(checkpoint_path=args.checkpoint)
     elif task == "record":
-        runner.record(checkpoint_path=args.checkpoint)
+        if args.record_comm:
+            runner.record_comm(checkpoint_path=args.checkpoint)
+        else:
+            runner.record(checkpoint_path=args.checkpoint)
     elif task == "analyze":
-        runner.analyze(checkpoint_path=args.checkpoint)
+        runner.analyze(checkpoint_path=args.checkpoint, output_dir=args.aout)
     else:
         parser.error(f"Unknown task: {task}")
 
