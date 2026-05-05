@@ -117,6 +117,9 @@ class MAGICHopfieldMAPPO(MAGICMAPPO):
             magic_cfg.get("hopfield_num_prototypes", policy0.hopfield_num_prototypes)
         )
         hopfield_beta = float(magic_cfg.get("hopfield_beta", policy0.hopfield_beta))
+        hopfield_gate_init = float(
+            magic_cfg.get("hopfield_gate_init", policy0.hopfield_gate_init)
+        )
 
         if self._cached_hopfield_comm_module is None:
             VmappedComm = nn.vmap(
@@ -133,6 +136,7 @@ class MAGICHopfieldMAPPO(MAGICMAPPO):
                 num_heads=num_heads,
                 hopfield_num_prototypes=hopfield_num_prototypes,
                 hopfield_beta=hopfield_beta,
+                hopfield_gate_init=hopfield_gate_init,
                 name="comm_block",
             )
             self._jit_hopfield_comm_apply = jax.jit(

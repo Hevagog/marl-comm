@@ -54,6 +54,7 @@ def create_magic_hopfield_models(
     gumbel_temperature: float = magic_cfg.get("gumbel_temperature", 1.0)
     hopfield_num_prototypes: int = magic_cfg.get("hopfield_num_prototypes", 8)
     hopfield_beta: float = magic_cfg.get("hopfield_beta", 1.0)
+    hopfield_gate_init: float = magic_cfg.get("hopfield_gate_init", 0.0)
 
     first_agent = possible_agents[0]
     act_space = action_spaces[first_agent]
@@ -93,6 +94,7 @@ def create_magic_hopfield_models(
             num_agents=num_agents,
             hopfield_num_prototypes=hopfield_num_prototypes,
             hopfield_beta=hopfield_beta,
+            hopfield_gate_init=hopfield_gate_init,
             unnormalized_log_prob=unnormalized_log_prob,
         )
         shared_policy.init_state_dict(role="policy")

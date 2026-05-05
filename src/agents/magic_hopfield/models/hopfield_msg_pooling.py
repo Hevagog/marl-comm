@@ -57,6 +57,7 @@ class HopfieldSelfContext(nn.Module):
     d_model: int
     num_prototypes: int = 8
     beta: float = 1.0
+    gate_init: float = 0.0
 
     def setup(self) -> None:
         self.prototypes = self.param(
@@ -64,12 +65,12 @@ class HopfieldSelfContext(nn.Module):
             nn.initializers.lecun_normal(),
             (self.num_prototypes, self.d_model),
         )
-        # gate_init=0.0 (sigmoid=0.5) per memory/hopfield_integration_strategy_2026_04_30.md
-        # §9 — gate=-2 starves prototype training (about.md §"gate-starvation").
-        # Backbone + retrieval start on equal footing; gate adapts under PPO.
+        # gate_init configurable: 0.0 (sigmoid 0.5) is the v2 default after
+        # the gate-starvation fix; -1.0 (sigmoid 0.27) damps random-prototype
+        # noise at init when β > 1 sharpens retrieval magnitudes.
         self.gate = self.param(
             "gate",
-            nn.initializers.constant(0.0),
+            nn.initializers.constant(self.gate_init),
             (),
         )
 

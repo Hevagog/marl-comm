@@ -287,6 +287,7 @@ class _CommBlockHopfieldSelf(nn.Module):
     num_heads: int
     hopfield_num_prototypes: int
     hopfield_beta: float
+    hopfield_gate_init: float = 0.0
 
     @nn.compact
     def __call__(
@@ -303,6 +304,7 @@ class _CommBlockHopfieldSelf(nn.Module):
             d_model=self.message_dim,
             num_prototypes=self.hopfield_num_prototypes,
             beta=self.hopfield_beta,
+            gate_init=self.hopfield_gate_init,
             name="hopfield_self",
         )(msg_group)  # (N, D)
 
@@ -347,6 +349,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
     num_agents: int = 2
     hopfield_num_prototypes: int = 8
     hopfield_beta: float = 1.0
+    hopfield_gate_init: float = 0.0
 
     def __init__(
         self,
@@ -360,6 +363,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
         num_agents: int = 2,
         hopfield_num_prototypes: int = 8,
         hopfield_beta: float = 1.0,
+        hopfield_gate_init: float = 0.0,
         unnormalized_log_prob: bool = True,
         device=None,
         **kwargs: Any,
@@ -376,6 +380,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
             self, "hopfield_num_prototypes", int(hopfield_num_prototypes)
         )
         object.__setattr__(self, "hopfield_beta", float(hopfield_beta))
+        object.__setattr__(self, "hopfield_gate_init", float(hopfield_gate_init))
 
     @nn.compact
     def __call__(
@@ -436,6 +441,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
                 num_heads=self.num_heads,
                 hopfield_num_prototypes=self.hopfield_num_prototypes,
                 hopfield_beta=self.hopfield_beta,
+                hopfield_gate_init=self.hopfield_gate_init,
                 name="comm_block",
             )(
                 _dummy_msg[None, :, :],
@@ -508,6 +514,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
                 num_heads=self.num_heads,
                 hopfield_num_prototypes=self.hopfield_num_prototypes,
                 hopfield_beta=self.hopfield_beta,
+                hopfield_gate_init=self.hopfield_gate_init,
                 name="comm_block",
             )(
                 _dummy_msg[None, :, :],
@@ -537,6 +544,7 @@ class MAGICHopfieldPolicyNet(CategoricalMixin, Model):
                     num_heads=self.num_heads,
                     hopfield_num_prototypes=self.hopfield_num_prototypes,
                     hopfield_beta=self.hopfield_beta,
+                    hopfield_gate_init=self.hopfield_gate_init,
                     name="comm_block",
                 )(
                     msg_grouped,
