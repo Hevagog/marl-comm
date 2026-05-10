@@ -1,0 +1,75 @@
+# fmt: off
+"""Coin Game Partial-Obs — MAGIC Episodic Hopfield (EH).
+
+The episodic buffer stores the last T=12 obs_enc vectors and retrieves via
+modern Hopfield attention (Ramsauer et al. ICLR 2021).  This is the only
+variant that can recall a *specific past moment* rather than compressing
+history into a fixed vector.
+
+Under partial observability the EH buffer provides a concrete capability:
+  - Buffer entry from step t-5: partner was at (2,6), visible.
+  - Now at step t: partner out of range.
+  - Hopfield query over buffer → retrieves the t-5 entry → agent knows where
+    partner was recently, can infer current position.
+
+Longer buffer than full-obs coingame_eh (T=8 → T=12) because longer episodes
+(max_cycles=100) and slower coin encounter rate on 7×7 grid mean useful events
+are spaced further apart in time.
+
+episodic_beta_init=2.0 keeps retrieval relatively soft early in training so
+the buffer learns useful content before it is queried sharply.
+"""
+import jax.numpy as jnp
+from skrl.resources.preprocessors.jax import RunningStandardScaler
+
+_ENV = {
+    "id": "coingame-partialobs", "num_envs": 16,
+    "grid_size": 7, "max_cycles": 100,
+    "vision_range": 2,
+    "pick_reward": 1.0, "steal_penalty": -2.0,
+}
+
+CONFIG = {
+    "experiment": {
+        "name": "magcomp_coingame_partialobs_eh", "agent_type": "magic",
+        "directory": "runs", "wandb": True,
+        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "coingame_partialobs", "magic_eh"]},
+        "write_interval": "auto", "checkpoint_interval": "auto", "store_separately": False,
+    },
+    "env": _ENV,
+    "training": {"timesteps": 5_000_000, "seed": 42},
+    "eval":     {"timesteps": 5_000, "checkpoint_path": None},
+    "record":   {"timesteps": 1_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 4},
+    "magic": {
+        "rollouts": 2048, "learning_epochs": 8, "mini_batches": 4,
+        "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 3e-4,
+        "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
+        "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
+        "state_preprocessor":               RunningStandardScaler,
+        "state_preprocessor_kwargs":        {"size": 13},
+        "shared_state_preprocessor":        RunningStandardScaler,
+        "shared_state_preprocessor_kwargs": {"size": 26},
+        "value_preprocessor":               RunningStandardScaler,
+        "value_preprocessor_kwargs":        {"size": 1},
+        "random_timesteps": 0, "learning_starts": 0,
+        "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
+        "clip_predicted_values": False,
+        "entropy_loss_scale": 0.02, "entropy_annealing": True,
+        "entropy_loss_scale_start": 0.10, "entropy_loss_scale_end": 0.02,
+        "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
+        "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -2.0, 1.0),
+        "time_limit_bootstrap": True, "weight_decay": 1e-4,
+        "message_dim": 32, "num_comm_rounds": 1, "num_heads": 1,
+        "gumbel_temperature": 1.0, "gumbel_temperature_end": 0.5,
+        "gumbel_temperature_anneal_fraction": 0.7,
+        "comm_reg_scale": 0.001,
+        "recurrent_type":        "hopfield",
+        "recurrent_hidden_size": 32,
+        "episodic_buffer_size":  12,   # longer than full-obs (8) due to 100-step episodes
+        "episodic_beta_init":    2.0,
+        "episodic_gate_init":    0.0,
+    },
+    "policy": {"hidden_sizes": [128, 128], "unnormalized_log_prob": True},
+    "value":  {"hidden_sizes": [128, 128]},
+    "memory": {"size": 2048},
+}

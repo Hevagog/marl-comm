@@ -99,6 +99,18 @@ def _create_env_factory(
             )
             return partial(make_coin_game_env, config=config, render_mode=render_mode)
 
+        case "coingame-partialobs":
+            from environments import make_coin_game_partial_obs_env, CoinGameConfig
+
+            config = CoinGameConfig(
+                grid_size=env_cfg.get("grid_size", 7),
+                max_cycles=env_cfg.get("max_cycles", 100),
+                pick_reward=env_cfg.get("pick_reward", 1.0),
+                steal_penalty=env_cfg.get("steal_penalty", -2.0),
+                vision_range=env_cfg.get("vision_range", 2),
+            )
+            return partial(make_coin_game_partial_obs_env, config=config, render_mode=render_mode)
+
         case "blindspot":
             from environments import make_blind_spot_env, BlindSpotConfig
 
@@ -186,7 +198,7 @@ def _create_env_factory(
 
         case _:
             raise ValueError(
-                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'flatland', 'warehouse', 'continuous_coord']"
+                f"Unknown env.id '{env_id}'. Choices: ['coingame', 'coingame-partialobs', 'blindspot', 'simple_adversary', 'overcooked', 'intersection', 'flatland', 'warehouse', 'continuous_coord']"
             )
 
 

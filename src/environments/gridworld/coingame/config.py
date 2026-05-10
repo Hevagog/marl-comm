@@ -20,3 +20,7 @@ class CoinGameConfig:
 
     fps: int = 10
     """Target frames per second for ``render_mode="human"``."""
+
+    vision_range: int = 2
+    """Manhattan-distance vision radius used by CoinGamePartialObsEnv.
+    Ignored by the base CoinGameEnv (full observability)."""

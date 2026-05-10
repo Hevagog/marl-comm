@@ -1,5 +1,6 @@
 from environments.gridworld import (
     make_coin_game_env,
+    make_coin_game_partial_obs_env,
     make_blind_spot_env,
     CoinGameConfig,
     BlindSpotConfig,
@@ -25,6 +26,7 @@ from environments.continuous_coord import (
 
 __all__ = [
     "make_coin_game_env",
+    "make_coin_game_partial_obs_env",
     "CoinGameConfig",
     "make_blind_spot_env",
     "BlindSpotConfig",
