@@ -148,6 +148,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
     episodic_buffer_size: int = 8
     episodic_beta_init: float = 1.0
     episodic_gate_init: float = 0.0
+    hopfield_num_prototypes: int = 16
+    hopfield_beta_init: float = 1.0
+    hopfield_gate_init: float = 0.0
 
     def __init__(
         self,
@@ -165,6 +168,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         episodic_buffer_size: int = 8,
         episodic_beta_init: float = 1.0,
         episodic_gate_init: float = 0.0,
+        hopfield_num_prototypes: int = 16,
+        hopfield_beta_init: float = 1.0,
+        hopfield_gate_init: float = 0.0,
         device=None,
         **kwargs: Any,
     ):
@@ -181,15 +187,18 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             rt = rt.lower()
             if rt in ("none", ""):
                 rt = None
-        if rt is not None and rt not in ("lstm", "gru", "hopfield"):
+        if rt is not None and rt not in ("lstm", "gru", "hopfield", "hopfield_state"):
             raise ValueError(
-                f"recurrent_type must be None, 'lstm', 'gru', or 'hopfield'; got {recurrent_type!r}"
+                f"recurrent_type must be None, 'lstm', 'gru', 'hopfield', or 'hopfield_state'; got {recurrent_type!r}"
             )
         object.__setattr__(self, "recurrent_type", rt)
         object.__setattr__(self, "recurrent_hidden_size", int(recurrent_hidden_size))
         object.__setattr__(self, "episodic_buffer_size", int(episodic_buffer_size))
         object.__setattr__(self, "episodic_beta_init", float(episodic_beta_init))
         object.__setattr__(self, "episodic_gate_init", float(episodic_gate_init))
+        object.__setattr__(self, "hopfield_num_prototypes", int(hopfield_num_prototypes))
+        object.__setattr__(self, "hopfield_beta_init", float(hopfield_beta_init))
+        object.__setattr__(self, "hopfield_gate_init", float(hopfield_gate_init))
 
     @property
     def recurrent_carry_size(self) -> int:
@@ -287,12 +296,14 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             if in_carry is None:
                 in_carry = zero_carry(self.recurrent_type, b, carry_width)
             in_carry = _broadcast_carry_to_batch(in_carry, b)
+            _is_ph = self.recurrent_type == "hopfield_state"
             new_carry, h_t = RecurrentEncoder(
                 hidden_size=self.recurrent_hidden_size,
                 recurrent_type=self.recurrent_type,
                 buffer_size=int(self.episodic_buffer_size),
-                beta_init=float(self.episodic_beta_init),
-                gate_init=float(self.episodic_gate_init),
+                beta_init=float(self.hopfield_beta_init if _is_ph else self.episodic_beta_init),
+                gate_init=float(self.hopfield_gate_init if _is_ph else self.episodic_gate_init),
+                num_prototypes=int(self.hopfield_num_prototypes),
                 name="recurrent",
             )(in_carry, obs_enc)
             obs_enc = h_t  # downstream uses the encoder output

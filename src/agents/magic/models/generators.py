@@ -83,6 +83,9 @@ def create_magic_models(
     gumbel_temperature: float = magic_cfg.get("gumbel_temperature", 1.0)
     recurrent_type = magic_cfg.get("recurrent_type", None)
     recurrent_hidden_size: int = int(magic_cfg.get("recurrent_hidden_size", 64))
+    hopfield_num_prototypes: int = int(magic_cfg.get("hopfield_num_prototypes", 16))
+    hopfield_beta_init: float = float(magic_cfg.get("hopfield_beta_init", 1.0))
+    hopfield_gate_init: float = float(magic_cfg.get("hopfield_gate_init", 0.0))
 
     first_agent = possible_agents[0]
     act_space = action_spaces[first_agent]
@@ -128,6 +131,9 @@ def create_magic_models(
             unnormalized_log_prob=unnormalized_log_prob,
             recurrent_type=recurrent_type,
             recurrent_hidden_size=recurrent_hidden_size,
+            hopfield_num_prototypes=hopfield_num_prototypes,
+            hopfield_beta_init=hopfield_beta_init,
+            hopfield_gate_init=hopfield_gate_init,
         )
         shared_policy.init_state_dict(role="policy")
 
@@ -159,6 +165,9 @@ def create_magic_models(
                 unnormalized_log_prob=unnormalized_log_prob,
                 recurrent_type=recurrent_type,
                 recurrent_hidden_size=recurrent_hidden_size,
+                hopfield_num_prototypes=hopfield_num_prototypes,
+                hopfield_beta_init=hopfield_beta_init,
+                hopfield_gate_init=hopfield_gate_init,
             )
             policy.init_state_dict(role="policy")
             models[agent] = {"policy": policy, "value": shared_value}

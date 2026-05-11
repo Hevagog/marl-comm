@@ -9,16 +9,27 @@ skrl's JAX agents do not provide built-in recurrence (skrl-torch has
 state externally in `MAGICMAPPO` and feed it into the policy through
 `inputs["recurrent_state"]`.
 
-Training caveat (TBPTT(0)):
-The skrl `RandomMemory` does not store hidden state. During the PPO update
-the policy is called without a `recurrent_state` entry, in which case the
-encoder falls back to a zero initial state. The cell weights still receive
-gradients from the single-step apply, so the layer is trainable, but
-gradients do not propagate across time. This is documented in the
-`MAGICPolicyNet` docstring; if recurrence shows empirical lift, the next
-step is to plumb hidden state into `RandomMemory.create_tensor` and re-use
-the stored state during the update (see TBPTT(1) in skrl-torch's
-`ppo_rnn.py`).
+Training depth (TBPTT(1), homogeneous path):
+`MAGICMAPPO` maintains a per-agent side-buffer `_rec_buffer` that snapshots
+the *input* carry h_{t-1} at every rollout step (written in
+`record_transition → _store_input_carry`).  During the PPO update,
+`_update_shared_policy` in `CategoricalMAPPO` calls
+`_sample_recurrent_minibatch(idx)` (via `getattr` hook) to slice the
+side-buffer with the same minibatch indices used for obs/actions, then
+passes the carry to `_update_policy_fixed` which injects it as
+`inputs["recurrent_state"] = jax.lax.stop_gradient(carry)`.  Cell weights
+therefore receive gradients from a single-step apply on the *correct* input
+carry (not zeros), making the update and rollout log-probs consistent at
+epoch 0 and avoiding IS-ratio inflation from the recurrent path.
+
+The `stop_gradient` prevents gradients from flowing *through* the carry
+into prior timesteps — depth is exactly one cell application per minibatch
+row, matching skrl-torch's `ppo_rnn.py` TBPTT(1) convention.
+
+Limitation: the heterogeneous update path (`_update_per_agent_policies`)
+does not yet inject the carry — `sampled_recurrent_state` is omitted from
+that call site.  Current warehouse configs are homogeneous so this is not
+blocking.
 
 References
 ----------
@@ -37,7 +48,7 @@ import jax
 import jax.numpy as jnp
 
 
-RecurrentType = Literal["lstm", "gru", "hopfield"]
+RecurrentType = Literal["lstm", "gru", "hopfield", "hopfield_state"]
 
 
 def zero_carry(
@@ -58,7 +69,7 @@ def zero_carry(
         c = jnp.zeros((batch_size, hidden_size), dtype=dtype)
         h = jnp.zeros((batch_size, hidden_size), dtype=dtype)
         return (c, h)
-    if recurrent_type in ("gru", "hopfield"):
+    if recurrent_type in ("gru", "hopfield", "hopfield_state"):
         return jnp.zeros((batch_size, hidden_size), dtype=dtype)
     raise ValueError(f"unknown recurrent_type: {recurrent_type!r}")
 
@@ -105,6 +116,7 @@ class RecurrentEncoder(nn.Module):
     buffer_size: int = 8
     beta_init: float = 1.0
     gate_init: float = 0.0
+    num_prototypes: int = 16
 
     @nn.compact
     def __call__(self, carry, x: jax.Array):
@@ -125,6 +137,18 @@ class RecurrentEncoder(nn.Module):
                 beta_init=self.beta_init,
                 gate_init=self.gate_init,
                 name="episodic_hopfield",
+            )
+            new_carry, h_t = cell(carry, x)
+            return new_carry, h_t
+        if self.recurrent_type == "hopfield_state":
+            from agents.magic.models.persistent_hopfield import HopfieldStateCell
+
+            cell = HopfieldStateCell(
+                hidden_size=self.hidden_size,
+                num_prototypes=self.num_prototypes,
+                beta_init=self.beta_init,
+                gate_init=self.gate_init,
+                name="hopfield_state",
             )
             new_carry, h_t = cell(carry, x)
             return new_carry, h_t
