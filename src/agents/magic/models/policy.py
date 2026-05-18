@@ -151,6 +151,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
     hopfield_num_prototypes: int = 16
     hopfield_beta_init: float = 1.0
     hopfield_gate_init: float = 0.0
+    hopfield_freeze_prototypes: bool = False
 
     def __init__(
         self,
@@ -171,6 +172,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         hopfield_num_prototypes: int = 16,
         hopfield_beta_init: float = 1.0,
         hopfield_gate_init: float = 0.0,
+        hopfield_freeze_prototypes: bool = False,
         device=None,
         **kwargs: Any,
     ):
@@ -199,6 +201,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "hopfield_num_prototypes", int(hopfield_num_prototypes))
         object.__setattr__(self, "hopfield_beta_init", float(hopfield_beta_init))
         object.__setattr__(self, "hopfield_gate_init", float(hopfield_gate_init))
+        object.__setattr__(self, "hopfield_freeze_prototypes", bool(hopfield_freeze_prototypes))
 
     @property
     def recurrent_carry_size(self) -> int:
@@ -304,6 +307,7 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 beta_init=float(self.hopfield_beta_init if _is_ph else self.episodic_beta_init),
                 gate_init=float(self.hopfield_gate_init if _is_ph else self.episodic_gate_init),
                 num_prototypes=int(self.hopfield_num_prototypes),
+                freeze_prototypes=bool(self.hopfield_freeze_prototypes),
                 name="recurrent",
             )(in_carry, obs_enc)
             obs_enc = h_t  # downstream uses the encoder output

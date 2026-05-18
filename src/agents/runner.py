@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 import tqdm as _tqdm_mod
 from skrl.trainers.jax import SequentialTrainer
 
-from utils.warehouse_eval_analysis import WarehouseEvalCollector
-from utils.warehouse_eval_visualizer import save_all_warehouse_figures
+from utils.mappo.warehouse_analysis import WarehouseEvalCollector
+from utils.mappo.warehouse_visualizer import save_all_warehouse_figures
 
 if TYPE_CHECKING:
     from skrl.multi_agents.jax import MultiAgent
@@ -153,16 +153,21 @@ class BaseRunner(ABC):
 
         if resume_from is not None:
             self._load_checkpoint(resume_from)
-            stem = Path(resume_from).stem  # e.g. "agent_1000000"
-            m = re.search(r"_(\d+)$", stem)
-            if m:
-                initial_timestep = int(m.group(1))
-                print(f"Resuming from timestep {initial_timestep}")
+            if self._cfg.get("reset_value_preprocessor", False):
+                print("reset_value_preprocessor=True: resetting value scaler stats …")
+                self._reset_value_preprocessors()
+                initial_timestep = 0  # Phase-2 transfer: start counter fresh
             else:
-                print(
-                    f"Warning: could not parse timestep from '{stem}'; "
-                    "starting counter from 0 but weights are loaded."
-                )
+                stem = Path(resume_from).stem  # e.g. "agent_1000000"
+                m = re.search(r"_(\d+)$", stem)
+                if m:
+                    initial_timestep = int(m.group(1))
+                    print(f"Resuming from timestep {initial_timestep}")
+                else:
+                    print(
+                        f"Warning: could not parse timestep from '{stem}'; "
+                        "starting counter from 0 but weights are loaded."
+                    )
 
         # Dispatch to the curriculum path when enabled — it still honours
         # ``initial_timestep`` for resumption.
@@ -241,9 +246,7 @@ class BaseRunner(ABC):
 
         # Apply stage-0 config immediately (the base cfg may be the terminal
         # stage, which is almost always *harder* than stage 0).
-        self._env = self._rebuild_flatland_env(
-            scheduler.config_for(scheduler.current)
-        )
+        self._env = self._rebuild_flatland_env(scheduler.config_for(scheduler.current))
         self._rebind_agent_to_env(self._env)
         print(
             f"[curriculum] starting at stage 0/{scheduler.num_stages - 1}: "
@@ -318,6 +321,7 @@ class BaseRunner(ABC):
         )
         try:
             import wandb  # type: ignore[import-untyped]
+
             if wandb.run is not None:
                 wandb.log(
                     {
@@ -474,6 +478,7 @@ class BaseRunner(ABC):
         def _np(v):
             try:
                 import jax
+
                 return np.asarray(jax.device_get(v))
             except Exception:
                 return np.asarray(v)
@@ -550,7 +555,11 @@ class BaseRunner(ABC):
         panel_h = env_frame.shape[0] if env_frame is not None else 480
         panel_w = panel_h  # square comm panel
 
-        title = "MAGIC — Communication Graph" if is_magic else "CommFormer — Communication Graph"
+        title = (
+            "MAGIC — Communication Graph"
+            if is_magic
+            else "CommFormer — Communication Graph"
+        )
 
         for step in range(max_steps):
             actions, _, outputs_per_agent = self._agent.act(
@@ -623,7 +632,7 @@ class BaseRunner(ABC):
         agent_type = self._cfg.get("experiment", {}).get("agent_type", "mappo")
 
         if agent_type == "commformer":
-            from utils.commformer_runner_integration import run_commformer_analysis
+            from utils.commformer.runner import run_commformer_analysis
 
             run_commformer_analysis(
                 self,
@@ -634,7 +643,7 @@ class BaseRunner(ABC):
             return
 
         if agent_type == "commformerhm":
-            from utils.commformer_runner_integration import run_commformer_analysis
+            from utils.commformer.runner import run_commformer_analysis
 
             run_commformer_analysis(
                 self,
@@ -645,7 +654,7 @@ class BaseRunner(ABC):
             return
 
         if agent_type == "mamhm":
-            from utils.mamhm_runner_integration import run_mamhm_analysis
+            from utils.mam.hopfield_runner import run_mamhm_analysis
 
             run_mamhm_analysis(
                 self,
@@ -655,128 +664,28 @@ class BaseRunner(ABC):
             )
             return
 
-        if env_id == "blindspot":
-            from utils.blindspot_eval_analysis import BlindSpotEvalCollector
-            from utils.blindspot_eval_visualizer import save_all_blindspot_figures
+        if agent_type in (
+            "mam",
+            "mam_enc_only",
+            "mam_hopfield_pooling",
+            "mam_hopfield_layer",
+            "mam_et_encoder",
+        ):
+            from utils.mam.runner import run_mam_analysis
 
-            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
-                from utils.magic_runner_integration import run_magic_analysis
-
-                run_magic_analysis(
-                    self, checkpoint_path, n_episodes, output_dir=f"{output_dir}/magic"
-                )
-
-            use_comm = env_cfg.get("use_communication", False)
-            num_tokens = env_cfg.get("num_message_tokens", 4)
-
-            collector = BlindSpotEvalCollector(
-                grid_size=env_cfg.get("grid_size", 9),
-                num_traps=env_cfg.get("num_traps", 5),
-                max_cycles=env_cfg.get("max_cycles", 100),
-                use_communication=use_comm,
-                num_message_tokens=num_tokens,
+            run_mam_analysis(
+                self,
+                checkpoint_path,
+                n_episodes,
+                output_dir=f"{output_dir}/mam",
             )
+            return
 
-            data = collector.collect(
-                env=self._env,
-                agent=self._agent,
-                n_episodes=n_episodes,
+        if env_id == "continuous_coord":
+            from utils.mappo.continuous_coord_analysis import (
+                ContinuousCoordEvalCollector,
             )
-
-            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_blindspot_figures(data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "simple_adversary":
-            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
-                from utils.magic_runner_integration import run_magic_analysis
-
-                run_magic_analysis(
-                    self,
-                    checkpoint_path,
-                    n_episodes,
-                    output_dir=f"{output_dir}/magic_sa",
-                )
-
-            from utils import SimpleAdversaryEvalCollector, save_all_sa_figures
-
-            sa_collector = SimpleAdversaryEvalCollector()
-
-            sa_data = sa_collector.collect(
-                env=self._env,
-                agent=self._agent,
-                n_episodes=n_episodes,
-            )
-
-            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_sa_figures(sa_data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "overcooked":
-            from utils.overcooked_eval_analysis import OvercookedEvalCollector
-            from utils.overcooked_eval_visualizer import save_all_overcooked_figures
-
-            collector = OvercookedEvalCollector()
-
-            data = collector.collect(
-                env=self._env,
-                agent=self._agent,
-                n_episodes=n_episodes,
-                max_steps_per_episode=env_cfg.get(
-                    "horizon", env_cfg.get("max_cycles", 200)
-                ),
-            )
-
-            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_overcooked_figures(data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "intersection":
-            from utils import HighwayIntersectionEvalCollector, save_all_highway_figures
-
-            if self._cfg.get("experiment", {}).get("agent_type") == "magic":
-                from utils import (
-                    MAGICHighwayCommCollector,
-                    save_all_magic_highway_figures,
-                )
-
-                collector = MAGICHighwayCommCollector(
-                    num_agents=env_cfg.get("num_agents", 4),
-                    duration=env_cfg.get("duration", 13),
-                    num_comm_rounds=self._cfg.get("magic", {}).get(
-                        "num_comm_rounds", 2
-                    ),
-                    message_dim=self._cfg.get("magic", {}).get("message_dim", 64),
-                )
-                data = collector.collect(
-                    env=self._env, agent=self._agent, n_episodes=n_episodes
-                )
-                exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-                save_all_magic_highway_figures(
-                    data, output_dir=f"{output_dir}/magic", prefix=exp_name
-                )
-
-            collector = HighwayIntersectionEvalCollector(
-                num_agents=env_cfg.get("num_agents", 4),
-                duration=env_cfg.get("duration", 13),
-                collision_reward=env_cfg.get("collision_reward", -5.0),
-                arrived_reward=env_cfg.get("arrived_reward", 1.0),
-            )
-            data = collector.collect(
-                env=self._env, agent=self._agent, n_episodes=n_episodes
-            )
-            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_highway_figures(data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "flatland":
-            from utils.flatland_eval_analysis import FlatlandEvalCollector
-            from utils.flatland_eval_visualizer import save_all_flatland_figures
-
-            collector = FlatlandEvalCollector(
-                num_agents=env_cfg.get("num_agents", len(self._env.possible_agents)),
-                max_steps_per_episode=env_cfg.get("max_episode_steps"),
-            )
-            data = collector.collect(
-                env=self._env, agent=self._agent, n_episodes=n_episodes
-            )
-            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_flatland_figures(data, output_dir=output_dir, prefix=exp_name)
-        elif env_id == "continuous_coord":
-            from utils.continuous_coord_eval_analysis import ContinuousCoordEvalCollector
-            from utils.continuous_coord_eval_visualizer import save_all_cc_figures
+            from utils.mappo.continuous_coord_visualizer import save_all_cc_figures
 
             cfg_env = env_cfg
             deadline_min = cfg_env.get("target_deadline_min", 30)
@@ -830,7 +739,41 @@ class BaseRunner(ABC):
                 env=self._env, agent=self._agent, n_episodes=n_episodes
             )
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
-            save_all_warehouse_figures(data, output_dir=f"{output_dir}/{exp_name}", prefix=exp_name)
+            save_all_warehouse_figures(
+                data, output_dir=f"{output_dir}/{exp_name}", prefix=exp_name
+            )
+
+        elif env_id == "coingame-partialobs" and self._cfg.get(
+            "altruism_reference_checkpoint"
+        ):
+            from utils.mappo.altruism_analysis import (
+                CoinGameAltruismCollector,
+                load_prototypes,
+            )
+            from utils.mappo.altruism_visualizer import save_all_altruism_figures
+
+            ref_ckpt = self._cfg["altruism_reference_checkpoint"]
+            # Load reference prototypes from Phase 1 checkpoint.
+            self._agent.load(ref_ckpt)
+            protos_ref = load_prototypes(self._agent)
+            # Reload the evaluation (Phase 2) checkpoint.
+            if path:
+                self._agent.load(path)
+
+            collector = CoinGameAltruismCollector(
+                protos_reference=protos_ref,
+                max_cycles=env_cfg.get("max_cycles", 100),
+            )
+            exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
+            print(f"\n[Altruism Analysis] Collecting {n_episodes} episodes …")
+            data = collector.collect(
+                env=self._env, agent=self._agent, n_episodes=n_episodes
+            )
+            save_all_altruism_figures(
+                {exp_name: data},
+                output_dir=f"{output_dir}/{exp_name}",
+                prefix=exp_name,
+            )
 
         else:
             from utils import EvalCollector, save_all_figures
@@ -854,3 +797,25 @@ class BaseRunner(ABC):
         """Load agent checkpoint from *path*."""
         self._agent.load(path)
         print(f"Loaded checkpoint: {path}")
+
+    def _reset_value_preprocessors(self) -> None:
+        """Reset RunningStandardScaler stats for all agents' value preprocessors.
+
+        Call this after loading a Phase-1 checkpoint into a Phase-2 runner so the
+        scaler re-fits to the new (standard) reward distribution rather than carrying
+        Phase-1 altruistic calibration into advantage estimation.
+        """
+        import jax.numpy as jnp
+
+        vp = getattr(self._agent, "_value_preprocessor", {})
+        seen: set[int] = set()
+        for uid, scaler in vp.items():
+            sid = id(scaler)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            if hasattr(scaler, "running_mean"):
+                scaler.running_mean = jnp.zeros_like(scaler.running_mean)
+                scaler.running_variance = jnp.ones_like(scaler.running_variance)
+                scaler.current_count = jnp.ones((1,), dtype=jnp.float32)
+                print(f"  Reset value_preprocessor for {uid}")

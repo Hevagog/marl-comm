@@ -117,6 +117,7 @@ class RecurrentEncoder(nn.Module):
     beta_init: float = 1.0
     gate_init: float = 0.0
     num_prototypes: int = 16
+    freeze_prototypes: bool = False
 
     @nn.compact
     def __call__(self, carry, x: jax.Array):
@@ -148,6 +149,7 @@ class RecurrentEncoder(nn.Module):
                 num_prototypes=self.num_prototypes,
                 beta_init=self.beta_init,
                 gate_init=self.gate_init,
+                freeze_prototypes=self.freeze_prototypes,
                 name="hopfield_state",
             )
             new_carry, h_t = cell(carry, x)

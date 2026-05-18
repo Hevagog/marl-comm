@@ -77,6 +77,10 @@ class HopfieldStateCell(nn.Module):
     num_prototypes: int = 16
     beta_init: float = 1.0
     gate_init: float = 0.0
+    freeze_prototypes: bool = False
+    """When True, stop_gradient is applied to the prototype bank so the
+    attractor geometry is fixed during training.  Use for the frozen_proto
+    transfer condition in the altruism-persistence experiment."""
 
     @nn.compact
     def __call__(self, carry: jax.Array, x: jax.Array):
@@ -111,6 +115,10 @@ class HopfieldStateCell(nn.Module):
 
         # Shared LayerNorm: normalises query and keys to unit-ish magnitude so
         # β controls sharpness alone (Schlag et al. 2021 §3.2).
+        # Freeze attractor geometry for the frozen_proto transfer condition.
+        if self.freeze_prototypes:
+            prototypes = jax.lax.stop_gradient(prototypes)
+
         ln = nn.LayerNorm(name="retrieval_ln")
         x_q = ln(x)                          # (B, H)
         proto_k = ln(prototypes)             # (K, H)

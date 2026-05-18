@@ -86,6 +86,7 @@ def create_magic_models(
     hopfield_num_prototypes: int = int(magic_cfg.get("hopfield_num_prototypes", 16))
     hopfield_beta_init: float = float(magic_cfg.get("hopfield_beta_init", 1.0))
     hopfield_gate_init: float = float(magic_cfg.get("hopfield_gate_init", 0.0))
+    hopfield_freeze_prototypes: bool = bool(magic_cfg.get("hopfield_freeze_prototypes", False))
 
     first_agent = possible_agents[0]
     act_space = action_spaces[first_agent]
@@ -134,6 +135,7 @@ def create_magic_models(
             hopfield_num_prototypes=hopfield_num_prototypes,
             hopfield_beta_init=hopfield_beta_init,
             hopfield_gate_init=hopfield_gate_init,
+            hopfield_freeze_prototypes=hopfield_freeze_prototypes,
         )
         shared_policy.init_state_dict(role="policy")
 
@@ -168,6 +170,7 @@ def create_magic_models(
                 hopfield_num_prototypes=hopfield_num_prototypes,
                 hopfield_beta_init=hopfield_beta_init,
                 hopfield_gate_init=hopfield_gate_init,
+                hopfield_freeze_prototypes=hopfield_freeze_prototypes,
             )
             policy.init_state_dict(role="policy")
             models[agent] = {"policy": policy, "value": shared_value}
