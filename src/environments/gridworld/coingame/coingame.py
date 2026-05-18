@@ -201,6 +201,14 @@ class CoinGameEnv:
         dict[str, dict],  # infos
     ]:
         rewards: dict[str, float] = {a: 0.0 for a in self._possible_agents}
+        reward_components: dict[str, dict[str, float]] = {
+            a: {
+                "own_coin": 0.0,
+                "steal_gain": 0.0,
+                "steal_penalty_received": 0.0,
+            }
+            for a in self._possible_agents
+        }
         self._step_count += 1
 
         gs = self._config.grid_size
@@ -220,6 +228,11 @@ class CoinGameEnv:
         #   processing order picks it up (deterministic tie-breaking).
         picked_red = False
         picked_blue = False
+        # Track pickup events for analysis: {agent: {"own": int, "steal": int}}
+        pickups: dict[str, dict[str, int]] = {
+            a: {"own": 0, "steal": 0} for a in self._possible_agents
+        }
+        pickup_events: list[dict[str, Any]] = []
 
         for agent in self._possible_agents:
             pos = self._agent_positions[agent]
@@ -235,7 +248,36 @@ class CoinGameEnv:
                 # If the Blue agent (agent_1) picks up a RED coin,
                 # the Red agent (agent_0) receives the steal penalty.
                 if agent == self._possible_agents[1]:
-                    rewards[self._possible_agents[0]] += self._config.steal_penalty
+                    victim = self._possible_agents[0]
+                    rewards[victim] += self._config.steal_penalty
+                    reward_components[agent]["steal_gain"] += self._config.pick_reward
+                    reward_components[victim]["steal_penalty_received"] += (
+                        self._config.steal_penalty
+                    )
+                    pickups[agent]["steal"] += 1
+                    pickup_events.append(
+                        {
+                            "coin_color": "red",
+                            "picker": agent,
+                            "victim": victim,
+                            "is_steal": True,
+                            "raw_picker_reward": self._config.pick_reward,
+                            "raw_victim_reward": self._config.steal_penalty,
+                        }
+                    )
+                else:
+                    reward_components[agent]["own_coin"] += self._config.pick_reward
+                    pickups[agent]["own"] += 1
+                    pickup_events.append(
+                        {
+                            "coin_color": "red",
+                            "picker": agent,
+                            "victim": None,
+                            "is_steal": False,
+                            "raw_picker_reward": self._config.pick_reward,
+                            "raw_victim_reward": 0.0,
+                        }
+                    )
                 # Respawn red coin
                 self._red_coin_pos = self._spawn_coin()
 
@@ -250,9 +292,56 @@ class CoinGameEnv:
                 # If the Red agent (agent_0) picks up a BLUE coin,
                 # the Blue agent (agent_1) receives the steal penalty.
                 if agent == self._possible_agents[0]:
-                    rewards[self._possible_agents[1]] += self._config.steal_penalty
+                    victim = self._possible_agents[1]
+                    rewards[victim] += self._config.steal_penalty
+                    reward_components[agent]["steal_gain"] += self._config.pick_reward
+                    reward_components[victim]["steal_penalty_received"] += (
+                        self._config.steal_penalty
+                    )
+                    pickups[agent]["steal"] += 1
+                    pickup_events.append(
+                        {
+                            "coin_color": "blue",
+                            "picker": agent,
+                            "victim": victim,
+                            "is_steal": True,
+                            "raw_picker_reward": self._config.pick_reward,
+                            "raw_victim_reward": self._config.steal_penalty,
+                        }
+                    )
+                else:
+                    reward_components[agent]["own_coin"] += self._config.pick_reward
+                    pickups[agent]["own"] += 1
+                    pickup_events.append(
+                        {
+                            "coin_color": "blue",
+                            "picker": agent,
+                            "victim": None,
+                            "is_steal": False,
+                            "raw_picker_reward": self._config.pick_reward,
+                            "raw_victim_reward": 0.0,
+                        }
+                    )
                 # Respawn blue coin
                 self._blue_coin_pos = self._spawn_coin()
+
+        raw_rewards = dict(rewards)
+
+        # Social welfare mixing (Matsumura et al. 2024): r_i ← (1−α)·r_i + α·r_partner
+        # Must be applied at env level — rewards_shaper in MAPPO sees only one agent at a time.
+        if self._config.social_welfare_alpha > 0.0:
+            a0, a1 = self._possible_agents[0], self._possible_agents[1]
+            r0, r1 = rewards[a0], rewards[a1]
+            alpha = self._config.social_welfare_alpha
+            rewards[a0] = (1.0 - alpha) * r0 + alpha * r1
+            rewards[a1] = (1.0 - alpha) * r1 + alpha * r0
+
+        for agent in self._possible_agents:
+            reward_components[agent]["raw_reward"] = raw_rewards[agent]
+            reward_components[agent]["mixed_reward"] = rewards[agent]
+            reward_components[agent]["social_welfare_transfer"] = (
+                rewards[agent] - raw_rewards[agent]
+            )
 
         done = self._step_count >= self._config.max_cycles
 
@@ -266,6 +355,14 @@ class CoinGameEnv:
         infos: dict[str, dict] = {
             a: {
                 "step": self._step_count,
+                "own_picks": pickups[a]["own"],
+                "steal_picks": pickups[a]["steal"],
+                "victimizations": sum(1 for e in pickup_events if e["victim"] == a),
+                "pickup_events": pickup_events,
+                "reward_components": reward_components[a],
+                "raw_reward": raw_rewards[a],
+                "mixed_reward": rewards[a],
+                "social_welfare_alpha": self._config.social_welfare_alpha,
             }
             for a in self._possible_agents
         }

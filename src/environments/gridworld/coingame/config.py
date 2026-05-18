@@ -24,3 +24,9 @@ class CoinGameConfig:
     vision_range: int = 2
     """Manhattan-distance vision radius used by CoinGamePartialObsEnv.
     Ignored by the base CoinGameEnv (full observability)."""
+
+    social_welfare_alpha: float = 0.0
+    """Social welfare mixing coefficient α ∈ [0, 1].
+    After coin resolution: r_i ← (1−α)·r_i + α·r_partner.
+    α=0 → standard selfish rewards; α=0.5 → equal split; α=1 → fully altruistic.
+    Implements the empathy-weighted reward from Matsumura et al. 2024 (Artificial Life)."""

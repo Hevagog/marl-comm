@@ -108,6 +108,7 @@ def _create_env_factory(
                 pick_reward=env_cfg.get("pick_reward", 1.0),
                 steal_penalty=env_cfg.get("steal_penalty", -2.0),
                 vision_range=env_cfg.get("vision_range", 2),
+                social_welfare_alpha=env_cfg.get("social_welfare_alpha", 0.0),
             )
             return partial(make_coin_game_partial_obs_env, config=config, render_mode=render_mode)
 
