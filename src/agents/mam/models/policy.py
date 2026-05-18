@@ -44,7 +44,15 @@ _OUTPUT_GAIN = 0.01
 
 
 class EncodeBlock(nn.Module):
-    """Pre-norm BiMamba + residual → pre-norm MLP + residual."""
+    """Post-norm BiMamba + residual → post-norm MLP + residual.
+
+    Matches InstaDeep reference (mam_networks.py:58-61):
+        x = ln1(x + bimamba(x))
+        x = ln2(x + mlp(x))
+    BiMamba itself is the wrapped module that internally does
+    ``outer_LN(x + BiMambaBlock(RMSNorm(x)))`` so each sub-layer has
+    its own input/output normalisation in addition to this outer LN.
+    """
 
     n_embd: int
     n_agent: int
@@ -71,8 +79,8 @@ class EncodeBlock(nn.Module):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = x + self.bimamba(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+        x = self.ln1(x + self.bimamba(x))
+        x = self.ln2(x + self.mlp(x))
         return x
 
 
@@ -148,17 +156,21 @@ class DecodeBlock(nn.Module):
         )
 
     def __call__(self, x: jax.Array, obs_rep: jax.Array) -> jax.Array:
-        """
+        """Post-norm decoder block — matches reference (mam_networks.py:158-164).
+
         x       : (batch, n_agent, n_embd)  — action embeddings
         obs_rep : (batch, n_agent, n_embd)  — encoder output
 
-        Follows the InstaDeep reference DecodeBlock (mam_networks.py:158-164):
-        after the cross-attn, the carrier switches to ``obs_rep`` so the obs
+        After cross-attn the carrier switches to ``obs_rep`` so the obs
         representation has a direct residual path into the logits head.
+        Each sub-layer is followed by its own LayerNorm; the inner Mamba
+        wrappers also normalise their input/output internally.
         """
-        x = x + self.mamba_self(self.ln1(x))
-        x = obs_rep + self.mamba_cross((self.ln2(x), obs_rep))
-        x = x + self.mlp(self.ln3(x))
+        x_new = self.mamba_self(x)
+        x = self.ln1(x + x_new)
+        x_new = self.mamba_cross((x, obs_rep))
+        x = self.ln2(obs_rep + x_new)
+        x = self.ln3(x + self.mlp(x))
         return x
 
     def recurrent(
@@ -170,21 +182,16 @@ class DecodeBlock(nn.Module):
         cross_hs: jax.Array,
         cross_buf: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Single-step recurrent forward.
-
-        Returns (x, self_hs, self_buf, cross_hs, cross_buf).
-        """
-        x_new, self_hs, self_buf = self.mamba_self.recurrent(
-            self.ln1(x), self_hs, self_buf
-        )
-        x = x + x_new
+        """Single-step recurrent forward — same post-norm topology as parallel."""
+        x_new, self_hs, self_buf = self.mamba_self.recurrent(x, self_hs, self_buf)
+        x = self.ln1(x + x_new)
         x_cross, cross_hs, cross_buf = self.mamba_cross.recurrent(
-            (self.ln2(x), obs_rep),
+            (x, obs_rep),
             cross_hs,
             cross_buf,
         )
-        x = obs_rep + x_cross
-        x = x + self.mlp(self.ln3(x))
+        x = self.ln2(obs_rep + x_cross)
+        x = self.ln3(x + self.mlp(x))
         return x, self_hs, self_buf, cross_hs, cross_buf
 
 

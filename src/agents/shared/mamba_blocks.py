@@ -283,7 +283,15 @@ class ResidualBlock(nn.Module):
 
 
 class Mamba(nn.Module):
-    """Raw causal Mamba module (no residual/norm — handled by caller)."""
+    """Reference-faithful Mamba wrapper.
+
+    Matches InstaDeep ``mamba_selfattention_block.Mamba``:
+    ``outer_norm(x + MambaBlock(RMSNorm(x)))``.
+    The inner RMSNorm bounds input magnitudes; the residual + outer
+    LayerNorm bound output magnitudes — without these, weight drift
+    during PPO produces 1e6+ activation explosions (verified on the
+    BiMamba mult-gate hazard but applies to all wrappers).
+    """
 
     num_agents: int
     d_model: int
@@ -295,15 +303,17 @@ class Mamba(nn.Module):
         self._args = MambaArgs(
             self.num_agents, self.d_model, self.d_state, self.d_conv, self.delta_rank
         )
-        self.block = MambaBlock(self._args)
+        self.block = ResidualBlock(self._args)
+        self.outer_norm = nn.LayerNorm()
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return self.block(x)
+        return self.outer_norm(self.block(x))
 
     def recurrent(
         self, x: jax.Array, hidden_state: HiddenState, buffer: Buffer
     ) -> tuple[jax.Array, HiddenState, Buffer]:
-        return self.block.recurrent(x, hidden_state, buffer)
+        x, hidden_state, buffer = self.block.recurrent(x, hidden_state, buffer)
+        return self.outer_norm(x), hidden_state, buffer
 
 
 # Bidirectional Mamba — replaces non-causal self-attention in encoder
@@ -361,7 +371,14 @@ class BiResidualBlock(nn.Module):
 
 
 class BiMamba(nn.Module):
-    """Raw bidirectional Mamba module (no residual/norm — handled by caller)."""
+    """Reference-faithful BiMamba wrapper.
+
+    Matches InstaDeep ``mamba_bidirectional_block.BiMamba``:
+    ``outer_norm(x + BiMambaBlock(RMSNorm(x)))``. Without these wrappers
+    the multiplicative gate ``h_fwd * flip(h_bwd)`` is unbounded — under
+    PPO weight drift it produces 1e16+ outputs at ×1.5 weight scaling
+    and NaNs by ×4 (verified empirically on warehouse_scaled_v1).
+    """
 
     num_agents: int
     d_model: int
@@ -373,10 +390,11 @@ class BiMamba(nn.Module):
         self._args = MambaArgs(
             self.num_agents, self.d_model, self.d_state, self.d_conv, self.delta_rank
         )
-        self.block = BiMambaBlock(self._args)
+        self.block = BiResidualBlock(self._args)
+        self.outer_norm = nn.LayerNorm()
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return self.block(x)
+        return self.outer_norm(self.block(x))
 
 
 # Cross-attentional Mamba — replaces cross-attention in decoder
@@ -527,7 +545,12 @@ class CrossResidualBlock(nn.Module):
 
 
 class CrossMamba(nn.Module):
-    """Raw cross-attentional Mamba module (no residual/norm — handled by caller)."""
+    """Reference-faithful CrossMamba wrapper.
+
+    Matches InstaDeep ``mamba_crossattention_block.CrossMamba``:
+    ``outer_norm(x1 + CrossMambaBlock(RMSNorm(x1), RMSNorm(x2)))``.
+    Returns only the transformed x1.
+    """
 
     num_agents: int
     d_model: int
@@ -539,11 +562,12 @@ class CrossMamba(nn.Module):
         self._args = MambaArgs(
             self.num_agents, self.d_model, self.d_state, self.d_conv, self.delta_rank
         )
-        self.block = CrossMambaBlock(self._args)
+        self.block = CrossResidualBlock(self._args)
+        self.outer_norm = nn.LayerNorm()
 
     def __call__(self, x1_x2: tuple[jax.Array, jax.Array]) -> jax.Array:
-        """Returns only the transformed x1."""
-        return self.block(x1_x2)
+        x1, _ = self.block(x1_x2)
+        return self.outer_norm(x1)
 
     def recurrent(
         self,
@@ -551,4 +575,8 @@ class CrossMamba(nn.Module):
         hidden_state: HiddenState,
         buffer: Buffer,
     ) -> tuple[jax.Array, HiddenState, Buffer]:
-        return self.block.recurrent(x1_x2, hidden_state, buffer)
+        x1_x2_out, hidden_state, buffer = self.block.recurrent(
+            x1_x2, hidden_state, buffer
+        )
+        x1, _ = x1_x2_out
+        return self.outer_norm(x1), hidden_state, buffer

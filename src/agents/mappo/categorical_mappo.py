@@ -319,6 +319,16 @@ def _update_policy_fixed(
     leaves = jax.tree_util.tree_leaves(grad)
     grad_global_norm = jnp.sqrt(sum(jnp.vdot(leaf, leaf).real for leaf in leaves))
 
+    # NaN/Inf grad guard: if any leaf is non-finite, zero the entire grad tree.
+    # Without this an upstream NaN propagates through optax → params → all
+    # subsequent logits NaN → categorical sampler degenerates to argmax-of-NaN
+    # = action 0 ("stay") and the agent appears to have learned a trivial
+    # no-op policy (warehouse_scaled v1/v5/v5b reward ≈315 = no-move floor).
+    grad_is_finite = jnp.isfinite(grad_global_norm)
+    grad = jax.tree_util.tree_map(
+        lambda g: jnp.where(grad_is_finite, g, jnp.zeros_like(g)), grad
+    )
+
     diag = {
         **diag,
         "adv_raw_mean": raw_adv_mean,
@@ -326,6 +336,7 @@ def _update_policy_fixed(
         "adv_raw_min": raw_adv_min,
         "adv_raw_max": raw_adv_max,
         "grad_global_norm": grad_global_norm,
+        "grad_nonfinite_skipped": jnp.float32(1.0) - grad_is_finite.astype(jnp.float32),
     }
 
     policy_loss = total_loss - entropy_loss
