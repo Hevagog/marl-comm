@@ -124,6 +124,12 @@ class WarehouseConfig:
     reward_rendezvous: float = 20.0
     rendezvous_cooldown: int = 50  # steps between re-trigger of same cell
 
+    # Hide the 8-feature infrastructure GPS block (obs[7:15]).
+    # When True, relative vectors to treatment/goal/repair/charger are zeroed.
+    # Forces agents to discover infrastructure via exploration or peer communication.
+    # obs_dim is unchanged — same feature slots, zeroed when radio info is hidden.
+    hide_infra_obs: bool = False
+
     fault_profile: FaultProfile = field(default_factory=FaultProfile)
 
     def __post_init__(self):

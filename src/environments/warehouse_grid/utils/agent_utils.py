@@ -103,27 +103,32 @@ def get_agent_observation(
     )
 
     # ------ relative positions to task / support cells (8 features) ------
-    treatment_pos = state.grid.treatment_positions[0]
-    goal_pos = state.grid.goal_positions[0]
-    repair_pos = state.grid.repair_position
-    if config.enable_battery:
-        charger_positions = state.grid.charger_positions
-        charger_distances = np.abs(charger_positions - np.array([row, col])).sum(axis=1)
-        charger_pos = charger_positions[int(np.argmin(charger_distances))]
+    # When hide_infra_obs=True these are zeroed — agents must discover
+    # infrastructure locations via exploration or peer communication.
+    if config.hide_infra_obs:
+        features.extend([0.0] * 8)
     else:
-        charger_pos = np.array([row, col], dtype=np.int32)
-    features.extend(
-        [
-            (treatment_pos[0] - row) / H,
-            (treatment_pos[1] - col) / W,
-            (goal_pos[0] - row) / H,
-            (goal_pos[1] - col) / W,
-            (repair_pos[0] - row) / H,
-            (repair_pos[1] - col) / W,
-            (charger_pos[0] - row) / H,
-            (charger_pos[1] - col) / W,
-        ]
-    )
+        treatment_pos = state.grid.treatment_positions[0]
+        goal_pos = state.grid.goal_positions[0]
+        repair_pos = state.grid.repair_position
+        if config.enable_battery:
+            charger_positions = state.grid.charger_positions
+            charger_distances = np.abs(charger_positions - np.array([row, col])).sum(axis=1)
+            charger_pos = charger_positions[int(np.argmin(charger_distances))]
+        else:
+            charger_pos = np.array([row, col], dtype=np.int32)
+        features.extend(
+            [
+                (treatment_pos[0] - row) / H,
+                (treatment_pos[1] - col) / W,
+                (goal_pos[0] - row) / H,
+                (goal_pos[1] - col) / W,
+                (repair_pos[0] - row) / H,
+                (repair_pos[1] - col) / W,
+                (charger_pos[0] - row) / H,
+                (charger_pos[1] - col) / W,
+            ]
+        )
 
     # ------ local grid view (6 features per cell) ------
     vr = config.vision_range

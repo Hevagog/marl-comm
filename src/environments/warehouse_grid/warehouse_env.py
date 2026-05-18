@@ -274,7 +274,7 @@ class MultiRobotWarehouseEnv:
         self._state, n_expired = expire_tasks(self._state, self._config)
 
         # --- 7. Rewards  ---
-        rewards_array = compute_rewards(
+        rewards_array, self._state = compute_rewards(
             self._state,
             pick_success,
             treat_complete,

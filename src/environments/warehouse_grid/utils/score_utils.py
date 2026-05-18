@@ -34,7 +34,7 @@ def compute_rewards(
     collision_mask: np.ndarray,
     config: WarehouseConfig,
     expired_tasks: int = 0,
-) -> np.ndarray:
+) -> tuple[np.ndarray, EnvState]:
     rewards = np.zeros(config.max_agents, dtype=np.float32)
     active_f = state.agent.active.astype(np.float32)
 
@@ -109,8 +109,14 @@ def compute_rewards(
                         rewards[j] += config.team_delivery_bonus
 
     # --- rendezvous occupancy bonus (Scenario 2) ---
+    # Edge-trigger + cooldown: reward fires once on the LOW→HIGH transition
+    # (occupants crosses rendezvous_min_agents threshold) and is suppressed
+    # for rendezvous_cooldown steps afterward.  Prevents profitable camping.
+    # Backed by Ng et al. (1999) potential-based shaping theory.
     if config.enable_rendezvous and state.grid.rendezvous_positions.size > 0:
         rendez = state.grid.rendezvous_positions
+        new_triggered_at = state.grid.rendezvous_triggered_at.copy()
+        new_above_threshold = state.grid.rendezvous_above_threshold.copy()
         for k in range(rendez.shape[0]):
             r, c = int(rendez[k, 0]), int(rendez[k, 1])
             if r < 0 or c < 0:
@@ -124,12 +130,19 @@ def compute_rewards(
                     and int(state.agent.positions[i, 1]) == c
                 ):
                     occupants.append(i)
-            if len(occupants) >= config.rendezvous_min_agents:
-                # Per-step bonus while the rendezvous is active.  Coordination
-                # is rewarded continuously while occupants stay together; no
-                # need for explicit cooldown bookkeeping in state.
+            currently_above = len(occupants) >= config.rendezvous_min_agents
+            was_above = bool(state.grid.rendezvous_above_threshold[k])
+            steps_since = state.step_count - int(state.grid.rendezvous_triggered_at[k])
+            if currently_above and not was_above and steps_since > config.rendezvous_cooldown:
                 for i in occupants:
                     rewards[i] += config.reward_rendezvous
+                new_triggered_at[k] = state.step_count
+            new_above_threshold[k] = currently_above
+        new_grid = state.grid._replace(
+            rendezvous_triggered_at=new_triggered_at,
+            rendezvous_above_threshold=new_above_threshold,
+        )
+        state = state._replace(grid=new_grid)
 
     # --- rescue proximity shaping ---
     # Provides intermediate gradient for the rescue navigation sub-task.
@@ -160,7 +173,7 @@ def compute_rewards(
     # --- zero out inactive ---
     rewards *= active_f
 
-    return rewards
+    return rewards, state
 
 
 def update_task_priorities(

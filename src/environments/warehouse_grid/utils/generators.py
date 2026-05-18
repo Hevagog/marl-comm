@@ -190,6 +190,9 @@ def _create_deterministic_layout(config: WarehouseConfig) -> GridState:
 
     # --- Rendezvous cells (Scenario 2) ---
     rendezvous_positions = _place_rendezvous_cells(config, layout, H, W)
+    k = rendezvous_positions.shape[0]
+    rendezvous_triggered_at = np.full(k, -(10**6), dtype=np.int32)
+    rendezvous_above_threshold = np.zeros(k, dtype=np.bool_)
 
     # --- Interference map  ---
     interference_map = _build_interference_map(config, treatment_positions)
@@ -206,6 +209,8 @@ def _create_deterministic_layout(config: WarehouseConfig) -> GridState:
         charger_positions=charger_positions,
         repair_position=repair_position,
         rendezvous_positions=rendezvous_positions,
+        rendezvous_triggered_at=rendezvous_triggered_at,
+        rendezvous_above_threshold=rendezvous_above_threshold,
     )
 
 
@@ -413,6 +418,9 @@ def _create_jittered_layout(
             task_priorities[int(pos[0]), int(pos[1])] = 1.0
 
     rendezvous_positions = _place_rendezvous_cells(config, layout, H, W)
+    k = rendezvous_positions.shape[0]
+    rendezvous_triggered_at = np.full(k, -(10**6), dtype=np.int32)
+    rendezvous_above_threshold = np.zeros(k, dtype=np.bool_)
     interference_map = _build_interference_map(config, treatment_positions)
 
     return GridState(
@@ -427,6 +435,8 @@ def _create_jittered_layout(
         charger_positions=charger_positions,
         repair_position=repair_position,
         rendezvous_positions=rendezvous_positions,
+        rendezvous_triggered_at=rendezvous_triggered_at,
+        rendezvous_above_threshold=rendezvous_above_threshold,
     )
 
 

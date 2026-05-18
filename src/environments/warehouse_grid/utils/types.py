@@ -105,6 +105,9 @@ class GridState(NamedTuple):
     interference_map : (H, W) float32 — comm noise multiplier.
     charger_positions : (num_chargers, 2) int32.
     repair_position : (2,) int32.
+    rendezvous_positions : (k, 2) int32 — [-1,-1] sentinel when disabled.
+    rendezvous_triggered_at : (k,) int32 — step when edge-trigger last fired; init -(10**6).
+    rendezvous_above_threshold : (k,) bool — whether cell was above min_agents last step.
     """
 
     layout: np.ndarray
@@ -120,6 +123,8 @@ class GridState(NamedTuple):
     charger_positions: np.ndarray
     repair_position: np.ndarray
     rendezvous_positions: np.ndarray
+    rendezvous_triggered_at: np.ndarray
+    rendezvous_above_threshold: np.ndarray
 
 
 class EnvState(NamedTuple):
