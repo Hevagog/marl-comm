@@ -9,8 +9,21 @@ shelf context, different episode step).
 
 Combined advantage over Dense: communication routes current sightings;
 EH carry re-activates previously-routed sightings from earlier in the episode.
-learning_epochs=4 and grad_norm_clip=0.3 carry forward from S3v2 to manage
-recurrent IS drift.
+
+Hyperparameters updated after observing S3v3 run failure (v1 plateaued −82 at
+1M, no phase transition). Dense (FF, no recurrence) transitioned at 0.72M with
+ratio_max_abs_dev≈25 and learning_epochs=8. EH v1 at learning_epochs=4 +
+grad_norm_clip=0.3 produced policy updates too small to cross the transition.
+
+EH's IS sensitivity is lower than LSTM/GRU because the carry is a weighted
+sum over a 16-frame buffer — changes to any single frame are diluted across
+the buffer. IS drift per update step ≈ (1/16) × LSTM drift. This allows
+more gradient steps than standard RNNs.
+
+Changes vs v1:
+  learning_epochs:    4  → 7    (between EH IS-safe ceiling and Dense=8)
+  grad_norm_clip:     0.3 → 0.5  (match Dense; buffer grads need headroom)
+  ratio_max_threshold: 10 → 25   (Dense hit 24.87 on its phase transition)
 """
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
@@ -60,7 +73,7 @@ CONFIG = {
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "magic": {
-        "rollouts": 4096, "learning_epochs": 4, "mini_batches": 4,
+        "rollouts": 4096, "learning_epochs": 7, "mini_batches": 4,
         "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 3e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
@@ -71,12 +84,12 @@ CONFIG = {
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
         "random_timesteps": 0, "learning_starts": 0,
-        "grad_norm_clip": 0.3, "ratio_clip": 0.2, "value_clip": 0.2,
+        "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.025, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.05, "entropy_loss_scale_end": 0.02,
         "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
-        "ratio_max_threshold": 10.0,
+        "ratio_max_threshold": 25.0,
         "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 30.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
         "message_dim": 64, "num_comm_rounds": 2, "num_heads": 2,

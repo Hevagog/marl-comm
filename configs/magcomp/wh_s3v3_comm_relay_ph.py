@@ -7,8 +7,25 @@ provides compressed attractor dynamics for "last known infrastructure mode"
 rather than EH's verbatim buffer — more robust under noisy comms because
 prototype retrieval filters noise before the carry update.
 
-learning_epochs=4, kl_threshold=0.02, ratio_max_threshold=20.0 carry forward
-from S3v2 PH to prevent Hopfield gradient spikes.
+Hyperparameters tuned from S3v3 Dense phase-transition observation:
+Dense (FF, no recurrence) broke through at 0.72M with ratio_max_abs_dev≈25,
+reward jumping −82 → +114.7. EH and LSTM plateaued at ≈−82 because their
+learning_epochs=4 + grad_norm_clip=0.3 + kl_threshold=0.05 produced policy
+updates too small to cross the cooperation phase transition.
+
+PH's IS sensitivity is lower than LSTM/GRU because the carry update is
+gate * softmax_retrieve(K, x) + (1−gate) * h_old — the new component depends
+on current prototypes K (slow-drifting) and current obs, not on h_{t−1}
+chained through time. Prototype drift per update batch is O(lr * grad_K) ≈
+3e-4 * 0.5 * 16 steps ≈ 2.4e-3, small enough that IS drift stays bounded.
+This allows more gradient steps per update than standard RNNs.
+
+Changes vs original S3v3 PH config:
+  kl_threshold:       0.02 → 0.05   (was terminating updates before large shifts)
+  learning_epochs:    4    → 7      (between EH=4 and Dense=8; IS-safe for PH)
+  grad_norm_clip:     0.3  → 0.5    (match Dense; attractor grads need headroom)
+  ratio_max_threshold: 20.0 → 25.0  (Dense hit 24.87 on its phase transition)
+  hopfield_beta_init: 0.5  → 1.0    (sharper prototype retrieval from start)
 """
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
@@ -58,7 +75,7 @@ CONFIG = {
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "magic": {
-        "rollouts": 4096, "learning_epochs": 4, "mini_batches": 4,
+        "rollouts": 4096, "learning_epochs": 7, "mini_batches": 4,
         "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 3e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
@@ -69,12 +86,12 @@ CONFIG = {
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
         "random_timesteps": 0, "learning_starts": 0,
-        "grad_norm_clip": 0.3, "ratio_clip": 0.2, "value_clip": 0.2,
+        "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.025, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.05, "entropy_loss_scale_end": 0.02,
-        "value_loss_scale": 1.0, "kl_threshold": 0.02, "kl_warmup_fraction": 0.3,
-        "ratio_max_threshold": 20.0,
+        "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
+        "ratio_max_threshold": 25.0,
         "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 30.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
         "message_dim": 64, "num_comm_rounds": 2, "num_heads": 2,
@@ -84,7 +101,7 @@ CONFIG = {
         "recurrent_type":          "hopfield_state",
         "recurrent_hidden_size":   64,
         "hopfield_num_prototypes": 16,
-        "hopfield_beta_init":      0.5,
+        "hopfield_beta_init":      1.0,
         "hopfield_gate_init":      0.0,
     },
     "policy": {"hidden_sizes": [256, 256], "unnormalized_log_prob": True},

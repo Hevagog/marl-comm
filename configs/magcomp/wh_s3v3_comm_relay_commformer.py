@@ -6,12 +6,21 @@ CommFormer's learned static graph α routes compressed obs embeddings
 (including peer vision patches) over all agents unconditionally. With
 no_comm=False the graph has richer input state to condition on than S3v2.
 
-Static topology is a disadvantage vs MAGIC's dynamic attention when
-infrastructure position varies each episode (randomize_layout=True), but
-CommFormer still routes peer vision content — which MAPPO cannot do.
+Static topology is a structural disadvantage with randomize_layout=True:
+α is trained to be a single topology averaged over all layouts, which
+works poorly for any individual layout. MAGIC's dynamic attention adapts
+per step; CommFormer cannot. This is an architecture limitation, not a
+hyperparameter one — but instability can be reduced.
 
-learning_epochs=2 and ratio_max_threshold=5.0 carry forward from S3v2 to
-prevent ratio drift over 4×2=8 gradient steps.
+Hyperparameters updated after v1 gradient explosion (grad_norm 0.29–0.46 at
+clip=0.5, reward oscillating −95 to −113 since 0.4M). Static α matrix
+receives high-variance gradients from episode-to-episode layout variation;
+with rollouts=1024 and a 4-agent environment, each mini-batch contains only
+128 samples per agent, making the gradient estimate noisy.
+
+Changes vs v1:
+  grad_norm_clip:  0.5 → 0.3  (reduce gradient variance; was at clip limit)
+  learning_epochs: 2   → 1    (4 gradient steps total vs 8; prevent α drift)
 
 obs_dim=190, shared_state_dim=1188.
 """
@@ -63,7 +72,7 @@ CONFIG = {
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "commformer": {
-        "rollouts": 1024, "learning_epochs": 2, "mini_batches": 4,
+        "rollouts": 1024, "learning_epochs": 1, "mini_batches": 4,
         "discount_factor": 0.99, "lambda": 0.95,
         "learning_rate": 3e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
@@ -77,7 +86,7 @@ CONFIG = {
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
         "random_timesteps": 0, "learning_starts": 0,
-        "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
+        "grad_norm_clip": 0.3, "ratio_clip": 0.2, "value_clip": 0.2,
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.025, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.05, "entropy_loss_scale_end": 0.02,

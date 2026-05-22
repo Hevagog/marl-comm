@@ -6,6 +6,19 @@ additionally route peer vision patches. LSTM carry accumulates "last known
 sighting direction" across steps, combining temporal integration with
 vision-content routing. Expected to outperform Dense when infrastructure
 leaves the 5×5 window between discovery and task assignment.
+
+Hyperparameters updated after v1 plateau (−85 to −90 since 0.4M, grad_norm
+stuck at 0.075, ratio 1.2–1.6 flat). Policy was barely moving per update.
+Dense phase-transitioned at 0.72M with learning_epochs=8 + grad_norm_clip=0.5.
+
+LSTM IS sensitivity is lower than GRU (forget gate + cell state = smoother
+carry; empirically ratio 1.6 vs GRU 2.4 at equivalent steps). Set learning
+epochs between GRU (conservative=3) and EH (Hopfield=7).
+
+Changes vs v1:
+  learning_epochs:    4  → 6    (more gradient steps; LSTM IS-safe ceiling)
+  grad_norm_clip:     0.3 → 0.5  (unlock gradient flow; was clipping at 0.3)
+  ratio_max_threshold: 10 → 20   (allow transition spike; lower than EH/PH=25)
 """
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
@@ -55,7 +68,7 @@ CONFIG = {
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "magic": {
-        "rollouts": 4096, "learning_epochs": 4, "mini_batches": 4,
+        "rollouts": 4096, "learning_epochs": 6, "mini_batches": 4,
         "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 3e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
@@ -66,12 +79,12 @@ CONFIG = {
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
         "random_timesteps": 0, "learning_starts": 0,
-        "grad_norm_clip": 0.3, "ratio_clip": 0.2, "value_clip": 0.2,
+        "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.025, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.05, "entropy_loss_scale_end": 0.02,
         "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
-        "ratio_max_threshold": 10.0,
+        "ratio_max_threshold": 20.0,
         "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 30.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
         "message_dim": 64, "num_comm_rounds": 2, "num_heads": 2,

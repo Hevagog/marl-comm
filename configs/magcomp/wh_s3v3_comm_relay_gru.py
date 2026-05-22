@@ -3,7 +3,21 @@
 
 Same role as LSTM but lighter cell. no_comm=False enriches obs with peer
 position/battery; MAGIC messages additionally route peer vision patches.
-GRU typically matches LSTM at TBPTT(1) horizons used here.
+
+Hyperparameters updated after v1 IS-drift divergence (ratio spiked to 23.49
+at 2.92M while reward declined to −103, clearly wrong-direction divergence).
+GRU showed higher IS sensitivity than LSTM at equivalent steps (ratio 2.44 vs
+1.6 at 0.9M) because the single hidden state h_t (no cell-state smoothing)
+accumulates TBPTT(1) carry drift faster.
+
+Conservative fix: fewer update steps per batch and tighter KL/ratio guards.
+GRU is unlikely to phase-transition (Dense needed ratio≈25; GRU can't safely
+reach that), but at least completes 4M without divergence.
+
+Changes vs v1:
+  learning_epochs:    4    → 3    (reduce per-batch drift accumulation)
+  ratio_max_threshold: 10.0 → 5.0  (hard cutoff well before divergence point)
+  kl_threshold:       0.05 → 0.03  (earlier update termination per rollout)
 """
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
@@ -53,7 +67,7 @@ CONFIG = {
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "magic": {
-        "rollouts": 4096, "learning_epochs": 4, "mini_batches": 4,
+        "rollouts": 4096, "learning_epochs": 3, "mini_batches": 4,
         "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 3e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
         "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
@@ -68,8 +82,8 @@ CONFIG = {
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.025, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.05, "entropy_loss_scale_end": 0.02,
-        "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
-        "ratio_max_threshold": 10.0,
+        "value_loss_scale": 1.0, "kl_threshold": 0.03, "kl_warmup_fraction": 0.3,
+        "ratio_max_threshold": 5.0,
         "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 30.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
         "message_dim": 64, "num_comm_rounds": 2, "num_heads": 2,
