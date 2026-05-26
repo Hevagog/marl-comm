@@ -830,6 +830,209 @@ def align_comm_around_rescue(
     return acc / safe[:, None, None]
 
 
+# ─── Phase label mapping (ResourcePhase IntEnum from warehouse_grid/utils/types.py)
+#   0 = UNPICKED         (agent idle, searching for a task)
+#   1 = IN_TRANSIT_TO_TREATMENT  (carrying resource toward treatment station)
+#   2 = TREATING         (locked at treatment station)
+#   3 = IN_TRANSIT_TO_GOAL       (carrying treated resource toward goal/delivery)
+PHASE_NAMES: dict[int, str] = {
+    0: "Idle/Search",
+    1: "→ Treatment",
+    2: "Treating",
+    3: "Delivering",
+}
+
+PHASE_COLORS: dict[int, str] = {
+    0: "#7CB9E8",   # blue-grey: searching
+    1: "#F4A460",   # sandy: in transit
+    2: "#55A868",   # green: active treatment
+    3: "#C44E52",   # red: delivering (urgency)
+}
+
+
+def compute_message_refinement_ratio(
+    data: MAGICWarehouseData,
+    eps: float = 1e-8,
+) -> dict[str, np.ndarray]:
+    """Per-agent message refinement ratio r_i = ||agg_i − msg_i|| / (||msg_i|| + ε).
+
+    Interpretation
+    --------------
+    Low r_i (≈0): the GAT aggregation left agent i's message nearly unchanged.
+      The self-loop path (adj[i,i]=1, always forced by MAGIC §4.3) dominates:
+      the agent's own pre-GAT embedding passes through as the output. This is
+      the self-loop-as-skip-connection regime described in §par:magicselflopp.
+
+    High r_i: peer messages substantially modified agent i's representation —
+      communication was meaningful (the off-diagonal GAT attention outweighed
+      the self-loop contribution).
+
+    Theoretical basis
+    -----------------
+    MAGIC MessageProcessor (Niu et al. 2021 §4.3 Eq. 8):
+        agg_i = Σ_{j} α_{ij}·W·m_j   where α_{ij} = softmax(LeakyReLU(a^T[Wh_i||Wh_j]))
+    When adj[i,i]=1 and all other adj[i,j]=0 (dense comm off), softmax
+    concentrates α_{ii}→1, so agg_i≈W·m_i and r_i→0.
+    The self-loop is therefore a communication-free fallback — it matters most
+    when the Scheduler decides not to open peer edges (sparse topology).
+    """
+    N = data.actual_num_agents
+    agents = [f"agent_{i}" for i in range(N)]
+    ratios: dict[str, list[float]] = {a: [] for a in agents}
+
+    for s in data.comm_steps():
+        if s.messages is None or s.agg_messages is None:
+            continue
+        msg = s.messages    # (N, D)  encoder output before GAT
+        agg = s.agg_messages  # (N, D)  after all MessageProcessor rounds
+        if msg.shape != agg.shape or msg.ndim != 2:
+            continue
+        for i, a in enumerate(agents):
+            if i >= msg.shape[0]:
+                continue
+            diff_norm = float(np.linalg.norm(agg[i] - msg[i]))
+            msg_norm = float(np.linalg.norm(msg[i])) + eps
+            ratios[a].append(diff_norm / msg_norm)
+
+    return {a: np.array(v, dtype=np.float32) for a, v in ratios.items()}
+
+
+def compute_refinement_by_phase(
+    data: MAGICWarehouseData,
+    eps: float = 1e-8,
+) -> dict[int, dict[str, np.ndarray]]:
+    """Message refinement ratio stratified by warehouse resource phase.
+
+    Returns {phase_int: {agent_id: ratio_array}}.
+
+    Why phase matters
+    -----------------
+    During phase=2 (Treating), agents are physically at a treatment station —
+    a coordination bottleneck where peer communication should be most valuable
+    (other agents need to know the station is locked). We expect higher r_i
+    during Treating, meaning the self-loop alone is insufficient and peers
+    contribute. If r_i stays low even during Treating for a given encoder,
+    the encoder already captured sufficient temporal context (e.g., via its
+    episodic Hopfield buffer) so it doesn't need peer input — supporting the
+    hypothesis that richer encoders reduce communication dependency.
+    """
+    N = data.actual_num_agents
+    agents = [f"agent_{i}" for i in range(N)]
+    by_phase: dict[int, dict[str, list[float]]] = {
+        p: {a: [] for a in agents} for p in range(4)
+    }
+
+    for s in data.comm_steps():
+        if s.messages is None or s.agg_messages is None:
+            continue
+        msg = s.messages
+        agg = s.agg_messages
+        if msg.shape != agg.shape or msg.ndim != 2:
+            continue
+        for i, a in enumerate(agents):
+            if i >= msg.shape[0]:
+                continue
+            ph = int(s.phase.get(a, 0))
+            ph = max(0, min(3, ph))
+            diff_norm = float(np.linalg.norm(agg[i] - msg[i]))
+            msg_norm = float(np.linalg.norm(msg[i])) + eps
+            by_phase[ph][a].append(diff_norm / msg_norm)
+
+    return {
+        p: {a: np.array(v, dtype=np.float32) for a, v in agent_dict.items()}
+        for p, agent_dict in by_phase.items()
+    }
+
+
+def compute_comm_density_by_phase(
+    data: MAGICWarehouseData,
+) -> dict[int, list[float]]:
+    """Off-diagonal communication density stratified by dominant warehouse phase.
+
+    Returns {phase_int: [density_values]}.
+
+    The dominant phase at each step is the mode over all agents (most common
+    phase value). This captures the team-level state rather than individual state.
+    """
+    by_phase: dict[int, list[float]] = {p: [] for p in range(4)}
+    for s in data.comm_steps():
+        if not s.phase:
+            continue
+        phases = list(s.phase.values())
+        # majority phase at this step
+        from collections import Counter
+        dominant = Counter(phases).most_common(1)[0][0]
+        dominant = max(0, min(3, int(dominant)))
+        by_phase[dominant].append(s.comm_density)
+    return by_phase
+
+
+def compute_summary_stats(data: MAGICWarehouseData) -> dict[str, Any]:
+    """Collect scalar summary statistics for the .txt table output (T5).
+
+    Columns saved to text file for dissertation table:
+        n_episodes, mean_deliveries, mean_ep_length,
+        r{k}_mean_edge_weight, r{k}_edge_density (per round),
+        mean_refinement_ratio, std_refinement_ratio,
+        phase{p}_comm_density (per phase),
+        pca_var_pc1 (from pre-GAT message PCA).
+    """
+    stats: dict[str, Any] = {
+        "n_episodes": data.n_episodes,
+        "mean_deliveries": data.mean_deliveries,
+        "mean_ep_length": data.mean_episode_length,
+        "num_agents": data.actual_num_agents,
+        "num_comm_rounds": data.num_comm_rounds,
+        "message_dim": data.message_dim,
+    }
+
+    if not data.has_comm_data:
+        return stats
+
+    for r in range(data.num_comm_rounds):
+        adj = compute_mean_adj(data, r)
+        N = adj.shape[0]
+        off = adj[~np.eye(N, dtype=bool)]
+        diag = np.diag(adj)
+        stats[f"r{r + 1}_mean_edge_weight"] = float(off.mean())
+        stats[f"r{r + 1}_edge_density"] = float((off > 0.5).mean())
+        stats[f"r{r + 1}_self_loop_mean"] = float(diag.mean())
+
+    ratios = compute_message_refinement_ratio(data)
+    all_r = np.concatenate([v for v in ratios.values() if len(v) > 0])
+    if len(all_r) > 0:
+        stats["mean_refinement_ratio"] = float(all_r.mean())
+        stats["median_refinement_ratio"] = float(np.median(all_r))
+        stats["std_refinement_ratio"] = float(all_r.std())
+
+    density_by_phase = compute_comm_density_by_phase(data)
+    for ph, vals in density_by_phase.items():
+        stats[f"phase{ph}_comm_density"] = float(np.mean(vals)) if vals else float("nan")
+
+    # PCA explained variance for pre-GAT messages
+    try:
+        from sklearn.decomposition import PCA as _PCA
+        mats = [
+            s.messages
+            for s in data.comm_steps()
+            if s.messages is not None and s.messages.ndim == 2
+        ]
+        if mats:
+            X = np.concatenate(mats, axis=0)
+            if len(X) > 8000:
+                rng = np.random.default_rng(0)
+                X = X[rng.choice(len(X), 8000, replace=False)]
+            if X.shape[1] >= 2:
+                pca = _PCA(n_components=2, random_state=0)
+                pca.fit(X)
+                stats["pca_var_pc1"] = float(pca.explained_variance_ratio_[0])
+                stats["pca_var_pc2"] = float(pca.explained_variance_ratio_[1])
+    except ImportError:
+        pass
+
+    return stats
+
+
 def print_summary(data: MAGICWarehouseData) -> None:
     print("\n" + "=" * 65)
     print("  MAGIC Warehouse Communication Analysis Summary")

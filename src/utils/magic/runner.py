@@ -158,10 +158,19 @@ def run_magic_analysis(
             agent=runner._agent,
             n_episodes=n_episodes,
         )
+        # Derive encoder/scenario labels from config for the .txt summary table
+        _rt = magic_cfg.get("recurrent_type", None)
+        if _rt is None or (isinstance(_rt, str) and _rt.lower() in ("none", "")):
+            _enc = "dense"
+        else:
+            _enc = str(_rt).lower()
+        _scenario = "_".join(exp_name.split("_")[1:]) if "_" in exp_name else exp_name
         save_all_magic_warehouse_figures(
             comm_data,
             output_dir=f"{output_dir}/comm",
             prefix=exp_name,
+            encoder_label=_enc,
+            scenario_label=_scenario,
         )
 
         # Also run performance analysis (MAPPO-style metrics)

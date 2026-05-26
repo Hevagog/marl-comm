@@ -235,22 +235,25 @@ def fig_graph_structure(data: CommFormerAnalysisData, prefix: str) -> plt.Figure
         )
 
     # nx.draw_networkx_edges silently ignores self-loops with arrows=True.
-    # Draw them explicitly as small dashed arcs offset radially from each node.
+    # Draw them explicitly as small circles offset radially from each node.
+    # Use ax.plot (not mpatches.Arc) — Arc is unreliable across backends.
+    _sl_r = 0.12
+    _sl_offset = 1.35
     for i in range(n):
         if adj[i, i] <= 0.5:
             continue
         xi, yi = pos[i]
-        loop = mpatches.Arc(
-            (xi * 1.35, yi * 1.35),
-            width=0.24,
-            height=0.24,
+        cx, cy = xi * _sl_offset, yi * _sl_offset
+        theta = np.linspace(0, 2 * np.pi, 64)
+        ax.plot(
+            cx + _sl_r * np.cos(theta),
+            cy + _sl_r * np.sin(theta),
             color="#888888",
             alpha=0.7,
             lw=1.5,
             linestyle="--",
             zorder=3,
         )
-        ax.add_patch(loop)
     ax.set_xlim(-1.65, 1.65)
     ax.set_ylim(-1.65, 1.65)
 

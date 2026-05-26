@@ -40,6 +40,8 @@ matplotlib.use("Agg")
 
 from .warehouse_analysis import (
     MAGICWarehouseData,
+    PHASE_NAMES,
+    PHASE_COLORS,
     compute_mean_adj,
     compute_conditional_adj,
     compute_comm_vs_context,
@@ -50,6 +52,10 @@ from .warehouse_analysis import (
     compute_round_divergence,
     compute_message_norm_over_time,
     align_comm_around_rescue,
+    compute_message_refinement_ratio,
+    compute_refinement_by_phase,
+    compute_comm_density_by_phase,
+    compute_summary_stats,
     print_summary,
 )
 
@@ -185,21 +191,21 @@ def fig_network_diagram(data: MAGICWarehouseData, out_dir: Path, prefix: str) ->
                 w = adj[i, j]
                 if i == j:
                     # Self-loop: MAGIC always sets diagonal=1.0 via adj+eye.
-                    # Render as a small arc outside the node in radial direction.
+                    # Render as a small circle outside the node in radial direction.
+                    # Use ax.plot (not mpatches.Arc) — Arc is unreliable across backends.
                     if w < 0.05:
                         continue
                     sl_cx = node_x[i] * _SL_OFFSET
                     sl_cy = node_y[i] * _SL_OFFSET
-                    loop = mpatches.Arc(
-                        (sl_cx, sl_cy),
-                        width=2 * _SL_R,
-                        height=2 * _SL_R,
+                    theta = np.linspace(0, 2 * np.pi, 64)
+                    ax.plot(
+                        sl_cx + _SL_R * np.cos(theta),
+                        sl_cy + _SL_R * np.sin(theta),
                         color=agent_colors[i],
                         alpha=0.55,
                         lw=1.5,
                         zorder=3,
                     )
-                    ax.add_patch(loop)
                     continue
                 if w < 0.05:
                     continue
@@ -1218,6 +1224,467 @@ def fig_summary_dashboard(data: MAGICWarehouseData, out_dir: Path, prefix: str) 
     _save(fig, out_dir, f"{prefix}_16_summary_dashboard")
 
 
+# ─── Figure 17: T1 — Self-loop contribution / message refinement ─────────────
+
+
+def fig_self_loop_contribution(
+    data: MAGICWarehouseData, out_dir: Path, prefix: str
+) -> None:
+    """Message refinement ratio r_i = ||agg_i − msg_i|| / ||msg_i||.
+
+    Scientific motivation
+    ---------------------
+    MAGIC forces self-loops via adj[i,i]=1 (Niu et al. 2021 §4.3). During
+    MessageProcessor GAT aggregation, when no peer edges are open, the
+    self-loop makes α_{ii}→1 and the agent's own pre-GAT message passes
+    through nearly unchanged. Low r_i therefore indicates the self-loop
+    path dominates — the agent relies on its own encoder rather than peers.
+
+    The dissertation §par:magicselflopp asks whether the self-loop is
+    sufficient to replace the LSTM. If Dense agents (no temporal memory) have
+    consistently low r_i, the self-loop substitutes for recurrence in
+    non-interference scenarios. If r_i spikes during Treating (phase=2), the
+    coordination bottleneck forces actual peer communication even for Dense.
+    Encoders with temporal context (LSTM, GRU, EH, HSC) are expected to have
+    lower r_i because their encoder output already encodes history, reducing
+    the marginal value of peer messages (Ramsauer et al. 2021 Theorem 4.1:
+    storage capacity scales exponentially in the Hopfield retrieval step,
+    meaning the EH buffer can represent rich temporal context from memory).
+    """
+    if not data.has_comm_data:
+        return
+
+    N = data.actual_num_agents
+    agents = [f"agent_{i}" for i in range(N)]
+    agent_colors = _agent_colors(N)
+    labels = _agent_labels(N)
+
+    ratios = compute_message_refinement_ratio(data)
+    by_phase = compute_refinement_by_phase(data)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), constrained_layout=True)
+    fig.suptitle(
+        "Self-Loop Contribution Analysis — Message Refinement Ratio\n"
+        r"$r_i = \|\|agg_i - msg_i\|\| \;/\; \|\|msg_i\|\|$"
+        "  (low = self-loop dominates, high = peer comm contributed)",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    # Left panel: per-agent distribution (violin + box)
+    ax = axes[0]
+    data_for_plot = [ratios.get(a, np.array([])) for a in agents]
+    data_for_plot = [v for v in data_for_plot if len(v) > 0]
+    valid_labels = [labels[i] for i, a in enumerate(agents) if len(ratios.get(a, [])) > 0]
+    valid_colors = [agent_colors[i] for i, a in enumerate(agents) if len(ratios.get(a, [])) > 0]
+
+    if data_for_plot:
+        parts = ax.violinplot(data_for_plot, positions=range(len(data_for_plot)),
+                              showmedians=True, showextrema=False)
+        for pc, col in zip(parts["bodies"], valid_colors):
+            pc.set_facecolor(col)
+            pc.set_alpha(0.6)
+        parts["cmedians"].set_color("black")
+        parts["cmedians"].set_linewidth(2)
+        ax.set_xticks(range(len(data_for_plot)))
+        ax.set_xticklabels(valid_labels)
+        ax.set_ylabel(r"$r_i$  (refinement ratio)")
+        ax.set_xlabel("Agent")
+        ax.set_title("Per-agent distribution")
+        ax.axhline(0.5, color="gray", lw=0.8, ls="--", alpha=0.6, label="r=0.5")
+        ax.legend(fontsize=8)
+        ax.set_ylim(bottom=0)
+
+    # Right panel: per-phase boxplot (all agents pooled per phase)
+    ax = axes[1]
+    phase_data, phase_labels_plot, phase_colors_plot = [], [], []
+    for ph in range(4):
+        vals = np.concatenate([
+            by_phase.get(ph, {}).get(a, np.array([]))
+            for a in agents
+        ])
+        if len(vals) > 0:
+            phase_data.append(vals)
+            phase_labels_plot.append(f"{ph}: {PHASE_NAMES[ph]}\n(n={len(vals)})")
+            phase_colors_plot.append(PHASE_COLORS[ph])
+
+    if phase_data:
+        bp = ax.boxplot(phase_data, patch_artist=True, notch=False,
+                        medianprops=dict(color="black", lw=2),
+                        whiskerprops=dict(lw=1.2),
+                        flierprops=dict(marker=".", markersize=3, alpha=0.3))
+        for patch, col in zip(bp["boxes"], phase_colors_plot):
+            patch.set_facecolor(col)
+            patch.set_alpha(0.7)
+        ax.set_xticklabels(phase_labels_plot, fontsize=8)
+        ax.set_ylabel(r"$r_i$  (refinement ratio)")
+        ax.set_title("Per-phase distribution\n(pooled over agents)")
+        ax.axhline(0.5, color="gray", lw=0.8, ls="--", alpha=0.6)
+        ax.set_ylim(bottom=0)
+
+    _save(fig, out_dir, f"{prefix}_17_self_loop_contribution")
+
+
+# ─── Figure 18: T3 — Encoder PCA coloured by resource phase ──────────────────
+
+
+def fig_phase_pca(data: MAGICWarehouseData, out_dir: Path, prefix: str) -> None:
+    """PCA of pre-GAT encoder outputs coloured by warehouse resource phase.
+
+    Scientific motivation
+    ---------------------
+    Bengio et al. (2013, "Representation Learning") formalise that linear
+    separability of learned representations in PCA space indicates the encoder
+    captures the factors of variation relevant to the task. For warehouse, the
+    four resource phases (Idle, → Treatment, Treating, Delivering) are the
+    primary task-relevant state transitions.
+
+    If the encoder produces well-separated phase clusters in PCA space, the
+    encoder output already encodes task phase — enabling phase-aware message
+    passing without relying on explicit peer observations. This is especially
+    relevant for the Episodic Hopfield (EH) and Hopfield State Cell (HSC)
+    encoders: their rolling retrieval buffers are expected to produce attractor-
+    like representations near prototype states for each phase (Ramsauer et al.
+    2021, §4.1: fixed points of the Hopfield energy correspond to stored
+    patterns). Dense and LSTM/GRU encoders may show more diffuse or trajectory-
+    like structure in PCA space respectively.
+
+    Uses pre-GAT messages = the encoder output e_m(h_i^t) before MessageProcessor
+    aggregation, so PCA reflects encoder quality, not communication.
+    """
+    try:
+        from sklearn.decomposition import PCA
+    except ImportError:
+        return
+
+    if not data.has_comm_data:
+        return
+
+    N = data.actual_num_agents
+    agents = [f"agent_{i}" for i in range(N)]
+
+    # Build (X, phase_label) pairs from pre-GAT messages
+    mats, phase_vals = [], []
+    for s in data.comm_steps():
+        if s.messages is None or s.messages.ndim != 2:
+            continue
+        for i, a in enumerate(agents):
+            if i >= s.messages.shape[0]:
+                continue
+            mats.append(s.messages[i])
+            phase_vals.append(int(s.phase.get(a, 0)))
+
+    if len(mats) < 10:
+        return
+
+    X = np.array(mats, dtype=np.float32)
+    C = np.array(phase_vals, dtype=np.int32)
+
+    if len(X) > 8000:
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(X), 8000, replace=False)
+        X, C = X[idx], C[idx]
+
+    if X.shape[1] < 2:
+        return
+
+    pca = PCA(n_components=2, random_state=0)
+    proj = pca.fit_transform(X)
+    var = pca.explained_variance_ratio_
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), constrained_layout=True)
+    fig.suptitle(
+        f"Encoder Output PCA — Resource Phase Coloring\n"
+        f"(pre-GAT messages e_m(h_i), PC1={var[0]:.1%}, PC2={var[1]:.1%})",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    # Left panel: all phases overlaid
+    ax = axes[0]
+    for ph in range(4):
+        mask = C == ph
+        if mask.sum() < 2:
+            continue
+        ax.scatter(
+            proj[mask, 0], proj[mask, 1],
+            c=PHASE_COLORS[ph],
+            s=6,
+            alpha=0.4,
+            label=f"{PHASE_NAMES[ph]} (n={mask.sum()})",
+            zorder=ph + 1,
+        )
+    ax.set_xlabel(f"PC1 ({var[0]:.1%})")
+    ax.set_ylabel(f"PC2 ({var[1]:.1%})")
+    ax.set_title("All phases overlaid")
+    ax.legend(markerscale=2, fontsize=8, loc="best")
+    ax.axhline(0, color="lightgray", lw=0.5)
+    ax.axvline(0, color="lightgray", lw=0.5)
+
+    # Right panel: per-phase centroid + ellipse (1-sigma)
+    ax = axes[1]
+    for ph in range(4):
+        mask = C == ph
+        if mask.sum() < 5:
+            continue
+        pts = proj[mask]
+        cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
+        sx, sy = pts[:, 0].std(), pts[:, 1].std()
+        theta = np.linspace(0, 2 * np.pi, 80)
+        ax.plot(
+            cx + sx * np.cos(theta),
+            cy + sy * np.sin(theta),
+            color=PHASE_COLORS[ph],
+            lw=2,
+            label=PHASE_NAMES[ph],
+        )
+        ax.scatter([cx], [cy], c=PHASE_COLORS[ph], s=60, zorder=5, edgecolors="white", lw=1)
+    ax.set_xlabel(f"PC1 ({var[0]:.1%})")
+    ax.set_ylabel(f"PC2 ({var[1]:.1%})")
+    ax.set_title("Phase centroids ± 1σ ellipses")
+    ax.legend(fontsize=8, loc="best")
+    ax.axhline(0, color="lightgray", lw=0.5)
+    ax.axvline(0, color="lightgray", lw=0.5)
+
+    _save(fig, out_dir, f"{prefix}_18_phase_pca")
+
+
+# ─── Figure 19: T4 — Communication density breakdown by phase ────────────────
+
+
+def fig_comm_density_breakdown(
+    data: MAGICWarehouseData, out_dir: Path, prefix: str
+) -> None:
+    """Off-diagonal comm density and in-degree stratified by warehouse phase.
+
+    Scientific motivation
+    ---------------------
+    The core empirical prediction from the dissertation §par:magicselflopp is:
+    *encoders with richer temporal context (EH, HSC, LSTM, GRU) should open
+    fewer peer edges* because their internal state already encodes relevant
+    history — the marginal information gained from a peer message is lower.
+
+    This figure makes that prediction measurable for a single encoder run:
+    - Left: mean off-diagonal comm density per phase (if Dense shows higher
+      density during Treating than EH, the prediction is confirmed).
+    - Right: per-agent in-degree by phase (who gets most messages and when).
+
+    Reference: Niu et al. (2021) MAGIC scheduler is explicitly designed to
+    produce *sparse* communication (sparsity regularisation in training).
+    If an encoder already provides temporal context, the scheduler has more
+    freedom to select sparsity — peer comm is only opened when genuinely needed.
+    """
+    if not data.has_comm_data:
+        return
+
+    N = data.actual_num_agents
+    agent_colors = _agent_colors(N)
+    labels = _agent_labels(N)
+
+    density_by_phase = compute_comm_density_by_phase(data)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), constrained_layout=True)
+    fig.suptitle(
+        "Communication Density Breakdown by Warehouse Phase\n"
+        "(off-diagonal adjacency fraction; high = more peer communication)",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    # Left panel: box plots per phase
+    ax = axes[0]
+    ph_plot_data, ph_tick_labels, ph_plot_colors = [], [], []
+    for ph in range(4):
+        vals = density_by_phase.get(ph, [])
+        if vals:
+            ph_plot_data.append(np.array(vals, dtype=np.float32))
+            ph_tick_labels.append(f"{ph}: {PHASE_NAMES[ph]}\n(n={len(vals)})")
+            ph_plot_colors.append(PHASE_COLORS[ph])
+
+    if ph_plot_data:
+        bp = ax.boxplot(
+            ph_plot_data, patch_artist=True, notch=False,
+            medianprops=dict(color="black", lw=2),
+            whiskerprops=dict(lw=1.2),
+            flierprops=dict(marker=".", markersize=3, alpha=0.3),
+        )
+        for patch, col in zip(bp["boxes"], ph_plot_colors):
+            patch.set_facecolor(col)
+            patch.set_alpha(0.7)
+        ax.set_xticklabels(ph_tick_labels, fontsize=8)
+        ax.set_ylabel("Off-diagonal adj density")
+        ax.set_title("Communication density per phase")
+        ax.set_ylim(0, 1.05)
+        # Add mean markers
+        for i, d in enumerate(ph_plot_data):
+            ax.scatter([i + 1], [d.mean()], marker="D", color="white",
+                       edgecolors="black", s=40, zorder=5, lw=1.2)
+
+    # Right panel: per-agent mean in-degree per phase
+    ax = axes[1]
+    # in-degree = column sum of off-diagonal adj, per agent per phase
+    n_phases_shown = 0
+    bar_width = 0.8 / max(N, 1)
+    for ph in range(4):
+        ph_steps = [s for s in data.comm_steps()
+                    if any(int(v) == ph for v in s.phase.values())]
+        if not ph_steps:
+            continue
+        mean_indegrees = np.zeros(N)
+        count = 0
+        for s in ph_steps:
+            if s.hard_adj is not None:
+                mat = s.hard_adj.copy()
+            elif s.adj_per_round:
+                mat = (s.adj_per_round[-1] > 0.5).astype(float)
+            else:
+                continue
+            np.fill_diagonal(mat, 0)
+            in_deg = mat.sum(axis=0)[:N]
+            mean_indegrees += in_deg
+            count += 1
+        if count > 0:
+            mean_indegrees /= count
+            x_pos = np.arange(N) + n_phases_shown * bar_width
+            ax.bar(
+                x_pos, mean_indegrees[:N],
+                width=bar_width * 0.9,
+                color=PHASE_COLORS[ph],
+                alpha=0.8,
+                label=PHASE_NAMES[ph],
+            )
+            n_phases_shown += 1
+
+    ax.set_xticks(np.arange(N) + (n_phases_shown - 1) * bar_width / 2)
+    ax.set_xticklabels(labels[:N])
+    ax.set_ylabel("Mean in-degree (hard adj, excl. self-loop)")
+    ax.set_xlabel("Agent")
+    ax.set_title("Per-agent in-degree by phase")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.set_ylim(bottom=0)
+
+    _save(fig, out_dir, f"{prefix}_19_comm_density_breakdown")
+
+
+# ─── T5 — Summary statistics .txt ────────────────────────────────────────────
+
+
+def save_summary_txt(
+    data: MAGICWarehouseData,
+    out_dir: Path,
+    prefix: str,
+    encoder_label: str = "",
+    scenario_label: str = "",
+) -> None:
+    """Write key statistics to a fixed-width .txt file for dissertation tables.
+
+    The file is formatted as a pipe-separated table so it can be copied
+    directly into the dissertation without manual reformatting. Each row
+    represents one run/encoder/scenario combination.
+
+    Fields
+    ------
+    encoder, scenario, n_ep, mean_deliveries, mean_ep_len,
+    r1_edge_density, r{k}_edge_density (per round),
+    mean_refinement_ratio ± std,
+    phase{p}_comm_density (per phase 0–3),
+    pca_var_pc1+pc2.
+    """
+    stats = compute_summary_stats(data)
+    R = data.num_comm_rounds
+
+    lines = [
+        "=" * 90,
+        f"  MAGIC Warehouse Analysis Summary  |  encoder={encoder_label or 'unknown'}"
+        f"  |  scenario={scenario_label or 'unknown'}",
+        "=" * 90,
+        "",
+        f"  Episodes          : {stats.get('n_episodes', '?')}",
+        f"  Mean deliveries   : {stats.get('mean_deliveries', float('nan')):.2f}",
+        f"  Mean ep. length   : {stats.get('mean_ep_length', float('nan')):.1f}",
+        f"  Agents            : {stats.get('num_agents', '?')}",
+        f"  Comm rounds       : {R}",
+        f"  Message dim       : {stats.get('message_dim', '?')}",
+        "",
+    ]
+
+    if data.has_comm_data:
+        lines.append("  -- Adjacency statistics (mean over all steps) --")
+        for r in range(R):
+            ew = stats.get(f"r{r + 1}_mean_edge_weight", float("nan"))
+            ed = stats.get(f"r{r + 1}_edge_density", float("nan"))
+            sl = stats.get(f"r{r + 1}_self_loop_mean", float("nan"))
+            lines.append(
+                f"  Round {r + 1}:  mean_edge_weight={ew:.4f}"
+                f"  edge_density={ed:.4f}"
+                f"  self_loop_mean={sl:.4f}"
+            )
+        lines.append("")
+
+        mr = stats.get("mean_refinement_ratio", float("nan"))
+        mr_med = stats.get("median_refinement_ratio", float("nan"))
+        mr_std = stats.get("std_refinement_ratio", float("nan"))
+        lines += [
+            "  -- Message refinement ratio r_i = ||agg_i - msg_i|| / ||msg_i|| --",
+            f"  Mean   : {mr:.4f}",
+            f"  Median : {mr_med:.4f}",
+            f"  Std    : {mr_std:.4f}",
+            "  (low = self-loop dominates, high = peer communication active)",
+            "",
+            "  -- Off-diagonal comm density per warehouse phase --",
+        ]
+        for ph in range(4):
+            d = stats.get(f"phase{ph}_comm_density", float("nan"))
+            lines.append(f"  Phase {ph} ({PHASE_NAMES[ph]:<15s}): {d:.4f}")
+        lines.append("")
+
+        pc1 = stats.get("pca_var_pc1", float("nan"))
+        pc2 = stats.get("pca_var_pc2", float("nan"))
+        lines += [
+            "  -- Pre-GAT encoder output PCA (messages) --",
+            f"  PC1 explained variance: {pc1:.4f}",
+            f"  PC2 explained variance: {pc2:.4f}",
+            f"  PC1+PC2 total         : {pc1 + pc2:.4f}",
+            "",
+        ]
+
+    # Machine-readable table row (pipe-separated, one row per run)
+    lines += [
+        "=" * 90,
+        "  MACHINE-READABLE ROW (copy into dissertation comparison table):",
+        "  " + " | ".join([
+            "encoder", "scenario", "n_ep", "deliveries", "ep_len",
+        ] + [f"r{r + 1}_density" for r in range(R)] + [
+            "ref_mean", "ref_std",
+            "ph0_density", "ph1_density", "ph2_density", "ph3_density",
+            "pca_pc1", "pca_pc2",
+        ]),
+        "  " + " | ".join([
+            f"{encoder_label or 'unknown':10s}",
+            f"{scenario_label or 'unknown':12s}",
+            f"{stats.get('n_episodes', 0):4d}",
+            f"{stats.get('mean_deliveries', float('nan')):10.2f}",
+            f"{stats.get('mean_ep_length', float('nan')):6.1f}",
+        ] + [
+            f"{stats.get(f'r{r + 1}_edge_density', float('nan')):.4f}" for r in range(R)
+        ] + [
+            f"{stats.get('mean_refinement_ratio', float('nan')):.4f}",
+            f"{stats.get('std_refinement_ratio', float('nan')):.4f}",
+            f"{stats.get('phase0_comm_density', float('nan')):.4f}",
+            f"{stats.get('phase1_comm_density', float('nan')):.4f}",
+            f"{stats.get('phase2_comm_density', float('nan')):.4f}",
+            f"{stats.get('phase3_comm_density', float('nan')):.4f}",
+            f"{stats.get('pca_var_pc1', float('nan')):.4f}",
+            f"{stats.get('pca_var_pc2', float('nan')):.4f}",
+        ]),
+        "=" * 90,
+    ]
+
+    out_path = out_dir / f"{prefix}_summary_stats.txt"
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  Summary statistics written → {out_path}")
+
+
 # ─── Master save function ─────────────────────────────────────────────────────
 
 
@@ -1226,7 +1693,19 @@ def save_all_magic_warehouse_figures(
     output_dir: str | Path = "eval_plots/warehouse/magic",
     prefix: str = "magic_warehouse",
     dpi: int = 150,
+    encoder_label: str = "",
+    scenario_label: str = "",
 ) -> None:
+    """Generate all MAGIC warehouse analysis figures and summary stats.
+
+    Parameters
+    ----------
+    encoder_label : short string describing the encoder variant, e.g. "dense",
+        "lstm", "gru", "eh", "hsc". Written into the .txt summary table so
+        results from different encoder runs can be concatenated into one table.
+    scenario_label : short string for the scenario, e.g. "s1_team_sync",
+        "s2_rendezvous", "s3v3_comm_relay", "s4_handoff", "s5_scaled".
+    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -1256,5 +1735,10 @@ def save_all_magic_warehouse_figures(
     fig_rescue_aligned(data, out, prefix)
     fig_interference_effect(data, out, prefix)
     fig_summary_dashboard(data, out, prefix)
+    # New: T1 self-loop analysis, T3 phase PCA, T4 density breakdown, T5 .txt
+    fig_self_loop_contribution(data, out, prefix)
+    fig_phase_pca(data, out, prefix)
+    fig_comm_density_breakdown(data, out, prefix)
+    save_summary_txt(data, out, prefix, encoder_label=encoder_label, scenario_label=scenario_label)
 
     print(f"\nAll MAGIC warehouse plots saved to {out}/")
