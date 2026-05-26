@@ -234,6 +234,26 @@ def fig_graph_structure(data: CommFormerAnalysisData, prefix: str) -> plt.Figure
             connectionstyle="arc3,rad=0.15",
         )
 
+    # nx.draw_networkx_edges silently ignores self-loops with arrows=True.
+    # Draw them explicitly as small dashed arcs offset radially from each node.
+    for i in range(n):
+        if adj[i, i] <= 0.5:
+            continue
+        xi, yi = pos[i]
+        loop = mpatches.Arc(
+            (xi * 1.35, yi * 1.35),
+            width=0.24,
+            height=0.24,
+            color="#888888",
+            alpha=0.7,
+            lw=1.5,
+            linestyle="--",
+            zorder=3,
+        )
+        ax.add_patch(loop)
+    ax.set_xlim(-1.65, 1.65)
+    ax.set_ylim(-1.65, 1.65)
+
     ax.set_title(f"Learned Communication Graph\n({prefix})", pad=10)
     ax.axis("off")
     fig.tight_layout()

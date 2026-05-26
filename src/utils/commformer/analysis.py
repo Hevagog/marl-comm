@@ -313,6 +313,9 @@ def compute_hard_adj_from_alpha(alpha: np.ndarray, sparsity: float) -> np.ndarra
     for i in range(n):
         top_k_idx = np.argsort(alpha[i])[::-1][:k]
         adj[i, top_k_idx] = 1.0
+    # policy.py forces self-loops as a NaN guard (jnp.maximum(adj, eye));
+    # match that here so hard_adj reflects what actually runs at inference.
+    np.fill_diagonal(adj, 1.0)
     return adj
 
 

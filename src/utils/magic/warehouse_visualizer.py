@@ -176,12 +176,31 @@ def fig_network_diagram(data: MAGICWarehouseData, out_dir: Path, prefix: str) ->
         max_weight = adj[~np.eye(N, dtype=bool)].max() if N > 1 else 1.0
         max_weight = max(max_weight, 1e-6)
 
-        # Draw edges
+        # Draw edges (including self-loops)
+        _SL_OFFSET = 1.38  # radial offset for self-loop circle center
+        _SL_R = 0.12       # self-loop circle radius
+
         for i in range(N):
             for j in range(N):
-                if i == j:
-                    continue
                 w = adj[i, j]
+                if i == j:
+                    # Self-loop: MAGIC always sets diagonal=1.0 via adj+eye.
+                    # Render as a small arc outside the node in radial direction.
+                    if w < 0.05:
+                        continue
+                    sl_cx = node_x[i] * _SL_OFFSET
+                    sl_cy = node_y[i] * _SL_OFFSET
+                    loop = mpatches.Arc(
+                        (sl_cx, sl_cy),
+                        width=2 * _SL_R,
+                        height=2 * _SL_R,
+                        color=agent_colors[i],
+                        alpha=0.55,
+                        lw=1.5,
+                        zorder=3,
+                    )
+                    ax.add_patch(loop)
+                    continue
                 if w < 0.05:
                     continue
                 norm_w = w / max_weight
