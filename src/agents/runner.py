@@ -709,6 +709,40 @@ class BaseRunner(ABC):
             exp_name = self._cfg.get("experiment", {}).get("name", "experiment")
             save_all_cc_figures(data, output_dir=output_dir, prefix=exp_name)
 
+            # MAGIC agents additionally expose the communication graph: collect
+            # the pre-/post-GAT message embeddings and render the S2-style PCA.
+            if agent_type == "magic":
+                from utils.magic.continuous_coord_analysis import (
+                    MAGICContinuousCoordCommCollector,
+                )
+                from utils.magic.continuous_coord_visualizer import (
+                    save_all_magic_cc_figures,
+                )
+
+                magic_cfg = self._cfg.get("magic", {})
+                comm_collector = MAGICContinuousCoordCommCollector(
+                    num_agents=cfg_env.get("num_agents", 4),
+                    num_comm_rounds=magic_cfg.get("num_comm_rounds", 2),
+                    message_dim=magic_cfg.get("message_dim", 32),
+                    max_cycles=cfg_env.get("max_cycles", 200),
+                    max_targets=cfg_env.get("max_targets", 3),
+                    type_dim=cfg_env.get("num_agent_types", 1)
+                    if cfg_env.get("num_agent_types", 1) > 1
+                    else 0,
+                    agent_types=cfg_env.get("agent_types"),
+                    deadline_avg=deadline_avg,
+                )
+                print(f"\n[MAGIC-CC Comm Analysis] Collecting {n_episodes} episodes …")
+                comm_data = comm_collector.collect(
+                    env=self._env, agent=self._agent, n_episodes=n_episodes
+                )
+                save_all_magic_cc_figures(
+                    comm_data,
+                    output_dir=f"{output_dir}/magic/comm",
+                    prefix=exp_name,
+                    encoder_label=str(magic_cfg.get("recurrent_type", "dense")),
+                )
+
         elif env_id in ("warehouse", "warehouse-jax"):
             if self._cfg.get("experiment", {}).get("agent_type") == "magic":
                 from utils import (
