@@ -24,6 +24,45 @@ def compute_congestion_penalty(
     return penalties
 
 
+def _proximity_potential(
+    state: EnvState,
+    config: WarehouseConfig,
+    stranded: np.ndarray,
+) -> np.ndarray:
+    """Per-agent potential Φ for potential-based rescue-proximity shaping.
+
+    ``Φ_i = scale · max(0, D_cap - d_i)`` where ``d_i`` is the Manhattan distance from
+    active agent ``i`` to the nearest stranded teammate (``Φ_i = 0`` if agent ``i`` is
+    inactive or no teammate is stranded within ``D_cap``).  ``D_cap`` is the comm range
+    (fallback: a quarter of the grid perimeter).  This is a *pure function of state*,
+    which is what makes the difference ``Φ(s') - Φ(s)`` in :func:`compute_rewards`
+    telescope to ``Φ_end - Φ_start`` over any active segment.
+    """
+    m = config.max_agents
+    phi = np.zeros(m, dtype=np.float32)
+    scale = config.reward_rescue_proximity
+    if scale <= 0.0:
+        return phi
+    stranded_idx = np.where(stranded)[0]
+    if stranded_idx.size == 0:
+        return phi
+    d_cap = (
+        float(config.comm_range)
+        if config.comm_range
+        else float((config.grid_height + config.grid_width) // 4)
+    )
+    pos = state.agent.positions
+    s_rows = pos[stranded_idx, 0].astype(np.int64)
+    s_cols = pos[stranded_idx, 1].astype(np.int64)
+    for i in range(m):
+        if not state.agent.active[i]:
+            continue
+        r, c = int(pos[i, 0]), int(pos[i, 1])
+        d = int(np.min(np.abs(s_rows - r) + np.abs(s_cols - c)))
+        phi[i] = scale * max(0.0, d_cap - float(d))
+    return phi
+
+
 def compute_rewards(
     state: EnvState,
     pick_success: np.ndarray,
@@ -144,31 +183,32 @@ def compute_rewards(
         )
         state = state._replace(grid=new_grid)
 
-    # --- rescue proximity shaping ---
-    # Provides intermediate gradient for the rescue navigation sub-task.
-    # Without this, agents must navigate 10-30 steps to a stranded teammate
-    # before receiving any signal — the rescue gradient is essentially zero.
-    # Reward = proximity_scale / (distance + 1) for each active agent near a
-    # stranded teammate; capped so it never exceeds a single delivery reward.
+    # --- potential-based rescue-proximity shaping (Ng et al. 1999; Devlin & Kudenko 2011) ---
+    # The OLD presence reward (scale/(dist+1) paid every step to any agent near a stranded
+    # teammate) was farmable by simply camping: an all-STAY policy collected it indefinitely
+    # and beat every trained agent (+335; see memory/wh_s5_noop_exploit_2026_06_04.md).
+    #
+    # It is now a *difference of potentials*:   F_i = Φ_i(s') - Φ_i(s),   with
+    #   Φ_i = scale · max(0, D_cap - dist_to_nearest_stranded_teammate)   (0 if none / inactive)
+    # Over any active segment the per-step F telescopes to  Φ_i(end) - Φ_i(start), so the TOTAL
+    # proximity reward an agent can collect is bounded by ±scale·D_cap *regardless of policy*:
+    # standing still gives F=0, an approach-then-retreat loop nets 0.  A dense gradient toward
+    # stranded teammates remains, but camping can no longer be farmed.  prev_proximity_phi holds
+    # Φ from last step; NaN marks an agent that was inactive then, so reactivation starts clean.
     if config.reward_rescue_proximity > 0.0:
         from .agent_utils import _stranded_mask
 
         stranded = _stranded_mask(state)
-        stranded_positions = [
-            state.agent.positions[j] for j in range(config.max_agents) if stranded[j]
-        ]
-        if stranded_positions:
-            scale = config.reward_rescue_proximity
-            for i in range(config.max_agents):
-                if not state.agent.active[i]:
-                    continue
-                # Skip agents already performing a rescue (they get the big reward)
-                if state.agent.rescue_target[i] >= 0:
-                    continue
-                pi = state.agent.positions[i]
-                for sp in stranded_positions:
-                    dist = abs(int(sp[0]) - int(pi[0])) + abs(int(sp[1]) - int(pi[1]))
-                    rewards[i] += scale / (dist + 1)
+        phi_cur = _proximity_potential(state, config, stranded)
+        prev = state.agent.prev_proximity_phi
+        new_prev = np.full(config.max_agents, np.nan, dtype=np.float32)
+        for i in range(config.max_agents):
+            if not state.agent.active[i]:
+                continue  # inactive: no shaping; prev stays NaN
+            if prev is not None and np.isfinite(prev[i]):
+                rewards[i] += float(phi_cur[i] - prev[i])
+            new_prev[i] = phi_cur[i]
+        state = state._replace(agent=state.agent._replace(prev_proximity_phi=new_prev))
 
     # --- zero out inactive ---
     rewards *= active_f

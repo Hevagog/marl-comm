@@ -1,9 +1,15 @@
 # fmt: off
-"""S5 Scaled — MAGIC Episodic Hopfield (12 agents).
+"""S5 Scaled — CommFormer (12 agents, 24×32).
 
-Mirrors magic_eh_warehouse_scaled_v2: T=16 buffer, β=2.0, gate=0.0,
-LayerNorm pre-retrieval. Pick→treat→deliver chain ≈12-20 steps fits in
-T=16. Carry 16×64=1024 per agent.
+CommFormer's O(N²) static adjacency matrix grows to 144 edges at N=12.
+sparsity=0.4 → k=round(0.4*12)=5 outgoing links per agent, balancing
+connectivity vs bandwidth. num_heads=4 provides capacity for heterogeneous
+role learning across 3 agent archetypes. num_blocks=2 covers graph diameter.
+
+Note: num_envs=1 due to memory pressure at N=12 on a single GPU.
+
+obs_dim = 238  (vision_range=2, max_agents=12, 3-archetype one-hot)
+shared_state_dim = 24*32*6 + 12*8 = 4704
 """
 import jax.numpy as jnp
 from skrl.resources.preprocessors.jax import RunningStandardScaler
@@ -41,45 +47,45 @@ _ENV = {
 
 CONFIG = {
     "experiment": {
-        "name": "magcomp_wh_s5_eh_v2", "agent_type": "magic",
+        "name": "magcomp_wh_s5_commformer_v2", "agent_type": "commformer",
         "directory": "runs", "wandb": True,
-        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "v2", "magic_eh"]},
+        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "v2", "commformer"]},
         "write_interval": 25_000, "checkpoint_interval": 2_500_000, "store_separately": False,
     },
     "env": _ENV,
     "training": {"timesteps": 5_000_000, "seed": 42},
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
-    "magic": {
-        "rollouts": 4096, "learning_epochs": 8, "mini_batches": 8,
-        "discount_factor": 0.99, "lambda": 0.95, "learning_rate": 2e-4,
+    "commformer": {
+        "rollouts": 1024, "learning_epochs": 3, "mini_batches": 4,
+        "discount_factor": 0.99, "lambda": 0.95,
+        "learning_rate": 2e-4,
         "learning_rate_scheduler": None, "learning_rate_scheduler_kwargs": {},
-        "linear_lr_decay": True, "lr_decay_start_fraction": 0.3, "min_lr_fraction": 0.1,
+        "linear_lr_decay": True, "lr_decay_start_fraction": 0.2, "min_lr_fraction": 0.1,
         "state_preprocessor":               RunningStandardScaler,
         "state_preprocessor_kwargs":        {"size": 238},
+        "update_state_preprocessor_in_update": False,
         "shared_state_preprocessor":        RunningStandardScaler,
         "shared_state_preprocessor_kwargs": {"size": 4704},
+        "update_shared_state_preprocessor_in_update": False,
         "value_preprocessor":               RunningStandardScaler,
         "value_preprocessor_kwargs":        {"size": 1},
         "random_timesteps": 0, "learning_starts": 0,
         "grad_norm_clip": 0.5, "ratio_clip": 0.2, "value_clip": 0.2,
         "clip_predicted_values": False,
         "entropy_loss_scale": 0.005, "entropy_annealing": True,
-        "entropy_loss_scale_start": 0.005, "entropy_loss_scale_end": 0.0005,
-        "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
+        "entropy_loss_scale_start": 0.005, "entropy_loss_scale_end": 0.001,
+        "value_loss_scale": 1.0,
+        "kl_threshold": 0.05, "kl_warmup_fraction": 0.0,
+        "ratio_max_threshold": 2.0,
         "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 20.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
-        "message_dim": 96, "num_comm_rounds": 3, "num_heads": 4,
-        "gumbel_temperature": 1.0, "gumbel_temperature_end": 0.5,
-        "gumbel_temperature_anneal_fraction": 0.7,
         "comm_reg_scale": 0.002,
-        "recurrent_type":        "hopfield",
-        "recurrent_hidden_size": 64,
-        "episodic_buffer_size":  16,
-        "episodic_beta_init":    2.0,
-        "episodic_gate_init":    0.0,
+        # 12-agent topology: sparsity=0.4→k=5 links; 4 heads for heterogeneous role separation
+        "hidden_dim": 128, "num_blocks": 2, "num_heads": 4,
+        "head_dim": 64, "mlp_dim": 256, "sparsity": 0.4,
     },
-    "policy": {"hidden_sizes": [256, 256], "unnormalized_log_prob": True},
-    "value":  {"hidden_sizes": [512, 512]},
-    "memory": {"size": 4096},
+    "policy": {"unnormalized_log_prob": True},
+    "value":  {"hidden_sizes": [256, 128]},
+    "memory": {"size": 1024},
 }

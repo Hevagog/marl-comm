@@ -21,7 +21,7 @@ _ENV = {
     "max_pending_tasks": 20, "penalty_task_expired": -1.0,
     "reward_urgent_delivery": 5.0,
     "enable_heterogeneous": True,
-    "agent_speed_options": (1, 1, 2),
+    "agent_speed_options": (1, 1, 1),
     "agent_capacity_options": (1, 2, 1),
     "agent_fragility_options": (1.0, 0.5, 2.0),
     "enable_battery": True, "battery_capacity": 250,
@@ -29,7 +29,8 @@ _ENV = {
     "battery_charge_rate": 8, "battery_critical_threshold": 30,
     "num_charging_stations": 4,
     "reward_rescue_repair": 12.0, "reward_rescue_charge": 12.0,
-    "reward_rescue_proximity": 0.2, "agent_failure_prob": 0.001,
+    "reward_rescue_proximity": 0.2, "penalty_collision": -0.1,
+    "agent_failure_prob": 0.001,
     "fault_profile": {
         "burst_attrition": True, "burst_prob": 0.001,
         "correlated_failure": False, "correlation_radius": 1,
@@ -39,13 +40,13 @@ _ENV = {
 
 CONFIG = {
     "experiment": {
-        "name": "magcomp_wh_s5_mappo", "agent_type": "mappo",
+        "name": "magcomp_wh_s5_mappo_v2", "agent_type": "mappo",
         "directory": "runs", "wandb": True,
-        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "mappo"]},
-        "write_interval": 25_000, "checkpoint_interval": 1_000_000, "store_separately": False,
+        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "v2", "mappo"]},
+        "write_interval": 25_000, "checkpoint_interval": 2_500_000, "store_separately": False,
     },
     "env": _ENV,
-    "training": {"timesteps": 10_000_000, "seed": 42},
+    "training": {"timesteps": 5_000_000, "seed": 42},
     "eval":     {"timesteps": 5_000, "checkpoint_path": None},
     "record":   {"timesteps": 2_000, "checkpoint_path": None, "video_dir": "recordings", "fps": 10},
     "mappo": {

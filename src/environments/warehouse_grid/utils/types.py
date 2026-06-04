@@ -72,6 +72,12 @@ class AgentState(NamedTuple):
     delivery_count: np.ndarray
     last_delivery_step: np.ndarray
 
+    # Potential-based rescue-proximity shaping: Φ_i from the previous step, used to form
+    # the difference-of-potentials F_i = Φ(s') - Φ(s) in score_utils.compute_rewards.
+    # NaN marks agents that were inactive last step (reactivation starts a fresh segment).
+    # Defaults to None so unrelated/analysis constructions need not supply it.
+    prev_proximity_phi: np.ndarray | None = None
+
 
 class TaskInfo(NamedTuple):
     """A single pending task in the dynamic task queue.

@@ -73,6 +73,9 @@ def create_agent_state(
         failed=np.zeros(m, dtype=np.bool_),
         delivery_count=np.zeros(m, dtype=np.int32),
         last_delivery_step=np.full(m, -10_000, dtype=np.int32),
+        # No prior potential at reset (no teammate is stranded) — first reward step
+        # gates on NaN so it contributes F=0, then seeds the running potential.
+        prev_proximity_phi=np.full(m, np.nan, dtype=np.float32),
     )
 
 
