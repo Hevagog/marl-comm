@@ -29,7 +29,9 @@ _ENV = {
     "battery_drain_per_step": 1, "battery_drain_idle": 0,
     "battery_charge_rate": 8, "battery_critical_threshold": 30,
     "num_charging_stations": 4,
-    "reward_rescue_repair": 12.0, "reward_rescue_charge": 12.0,
+    "reward_rescue_repair": 8.0, "reward_rescue_charge": 8.0,
+    # v3 incentive rebalance (2026-06-07): delivery>>rescue + dense pick/treat
+    "reward_delivery": 20.0, "reward_pick": 1.0, "reward_treatment_complete": 2.0,
     "reward_rescue_proximity": 0.2, "penalty_collision": -0.1,
     "agent_failure_prob": 0.001,
     "fault_profile": {
@@ -41,9 +43,9 @@ _ENV = {
 
 CONFIG = {
     "experiment": {
-        "name": "magcomp_wh_s5_eh_v2", "agent_type": "magic",
+        "name": "magcomp_wh_s5_eh_v3", "agent_type": "magic",
         "directory": "runs", "wandb": True,
-        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "v2", "magic_eh"]},
+        "wandb_kwargs": {"project": "marl-comm", "tags": ["magcomp", "wh_s5", "v3", "magic_eh"]},
         "write_interval": 25_000, "checkpoint_interval": 2_500_000, "store_separately": False,
     },
     "env": _ENV,
@@ -67,7 +69,7 @@ CONFIG = {
         "entropy_loss_scale": 0.005, "entropy_annealing": True,
         "entropy_loss_scale_start": 0.005, "entropy_loss_scale_end": 0.0005,
         "value_loss_scale": 1.0, "kl_threshold": 0.05, "kl_warmup_fraction": 0.3,
-        "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 20.0),
+        "rewards_shaper": lambda rewards, *_: jnp.clip(rewards, -5.0, 30.0),
         "time_limit_bootstrap": True, "weight_decay": 1e-4,
         "message_dim": 96, "num_comm_rounds": 3, "num_heads": 4,
         "gumbel_temperature": 1.0, "gumbel_temperature_end": 0.5,
