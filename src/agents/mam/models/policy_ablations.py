@@ -54,8 +54,8 @@ class _EncodeBlock(nn.Module):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = x + self.bimamba(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+        x = self.ln1(x + self.bimamba(x))
+        x = self.ln2(x + self.mlp(x))
         return x
 
 
