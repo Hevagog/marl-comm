@@ -33,18 +33,10 @@ def _get_runner(agent_type: str):
         from agents.mam.train_ablations import MAMEncOnlyRunner
 
         return MAMEncOnlyRunner
-    if agent_type == "etmat":
-        from agents.etmat.train import ETMATRunner
-
-        return ETMATRunner
     if agent_type == "mamhm":
         from agents import MAMHMRunner
 
         return MAMHMRunner
-    if agent_type == "commformerhm":
-        from agents.commformerhm.commformerhm_runner import CommFormerHMRunner
-
-        return CommFormerHMRunner
     if agent_type == "mam_hopfield_pooling":
         from agents.mam.train_ablations import MAMHopfieldPoolingRunner
 
@@ -57,22 +49,6 @@ def _get_runner(agent_type: str):
         from agents.mam.train_ablations import MAMETEncoderRunner
 
         return MAMETEncoderRunner
-    if agent_type == "syncmixer":
-        from agents.syncmixer.train import SyncMixerRunner
-
-        return SyncMixerRunner
-    if agent_type == "mat":
-        from agents.mat.train import MATRunner
-
-        return MATRunner
-    if agent_type == "mappo_hopfield":
-        from agents.mappo_hopfield.train import MAPPOHopfieldRunner
-
-        return MAPPOHopfieldRunner
-    if agent_type == "magic_hopfield":
-        from agents.magic_hopfield.train import MAGICHopfieldRunner
-
-        return MAGICHopfieldRunner
     raise ValueError(
         f"Unknown agent_type '{agent_type}'. Registered types: "
         f"{['mappo', 'magic', 'commformer', 'mam', 'mam_enc_only', 'etmat', 'mamhm', 'commformerhm', 'mam_hopfield_pooling', 'mam_hopfield_layer', 'mam_et_encoder', 'syncmixer', 'mat', 'mappo_hopfield', 'magic_hopfield']}"
@@ -110,7 +86,9 @@ def _create_env_factory(
                 vision_range=env_cfg.get("vision_range", 2),
                 social_welfare_alpha=env_cfg.get("social_welfare_alpha", 0.0),
             )
-            return partial(make_coin_game_partial_obs_env, config=config, render_mode=render_mode)
+            return partial(
+                make_coin_game_partial_obs_env, config=config, render_mode=render_mode
+            )
 
         case "blindspot":
             from environments import make_blind_spot_env, BlindSpotConfig

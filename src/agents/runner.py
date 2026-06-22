@@ -472,7 +472,7 @@ class BaseRunner(ABC):
         agent_labels = [f"A{i}" for i in range(num_agents)]
 
         # Determine which output key holds adjacency data
-        is_magic = agent_type in ("magic", "magic_hopfield")
+        is_magic = agent_type in ("magic")
 
         def _np(v):
             try:
