@@ -25,10 +25,9 @@ def gumbel_softmax(
     ``gumbel_scale`` (Hu et al. 2024 ICLR §4.2 trick, ported from the
     `magic_hopfield` variant) scales the additive Gumbel noise. 1.0 = standard
     stochastic sampling (rollout). 0.0 = deterministic argmax of logits while
-    keeping the STE topology — used during PPO updates to align rollout and
+    keeping the STE topology. Used during PPO updates to align rollout and
     training adjacency samples and so keep the importance ratio at 1.0 at the
-    start of each epoch (avoids the IS-mismatch documented in
-    memory/warehouse_scaled_analysis_2026_05_04.md §4.1).
+    start of each epoch
     """
     temp = jax.lax.stop_gradient(jnp.asarray(temperature, dtype=jnp.float32))
     scale = jax.lax.stop_gradient(jnp.asarray(gumbel_scale, dtype=jnp.float32))

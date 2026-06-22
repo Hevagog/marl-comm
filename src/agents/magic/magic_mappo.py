@@ -90,8 +90,6 @@ class MAGICMAPPO(CategoricalMAPPO):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Lazy-initialised cache for the heterogeneous comm block.
-        # Avoids recreating nn.vmap(_CommunicateBlock) every step.
         self._cached_comm_module: nn.Module | None = None
         self._jit_comm_apply = None
 
@@ -136,10 +134,6 @@ class MAGICMAPPO(CategoricalMAPPO):
         timestep: int,
         timesteps: int,
     ) -> tuple:
-        # Compute current Gumbel temperature (linear annealing from start→end
-        # over the first ``anneal_frac`` of training).  Enables dynamic
-        # sharpening of the Scheduler's Gumbel-Softmax without JIT recompilation
-        # (temperature is injected as a traced JAX scalar via inputs dict).
         magic_cfg = getattr(self, "cfg", {}).get("magic", {})
         t_start = float(magic_cfg.get("gumbel_temperature", 1.0))
         t_end = float(magic_cfg.get("gumbel_temperature_end", t_start))
@@ -263,22 +257,8 @@ class MAGICMAPPO(CategoricalMAPPO):
         """Generate actions for heterogeneous agents with cross-agent communication.
 
         Each agent has its own ``MAGICPolicyNet`` with a potentially different
-        observation dimension.  Communication still works because:
-
-        1. Each agent's message encoder maps obs → fixed-size ``message_dim``
-           embedding.  This is agent-specific (different obs_dim input) but
-           produces a uniform output.
-
-        2. Messages from all agents are stacked and passed through a shared
-           communication block (Scheduler + MessageProcessor from agent 0's
-           policy params).  This block operates purely in message space and
-           is independent of obs_dim.
-
-        3. Aggregated messages are distributed back to each agent's policy,
-           which uses them (via ``act_with_messages``) together with its own
-           obs encoding to produce actions.
-
-        This implements CTDE communication: local obs encoding is decentralised,
+        observation dimension.
+        Implements CTDE communication: local obs encoding is decentralised,
         but message passing is centralised across all agents.
         """
         uid0 = self.possible_agents[0]
@@ -323,7 +303,6 @@ class MAGICMAPPO(CategoricalMAPPO):
         policy0 = self.policies[uid0]
         comm_block_params = _extract_comm_block_params(policy0.state_dict)
 
-        # Generate a Gumbel RNG key for the comm block.
         with jax.default_device(policy0.device):
             policy0._c_i += 1
             gumbel_rng = jax.random.fold_in(
@@ -369,8 +348,6 @@ class MAGICMAPPO(CategoricalMAPPO):
             all_messages,
             group_keys,
         )
-        # processed_grouped: (num_envs, N, message_dim)
-        # adjs_grouped: (num_envs, num_comm_rounds, N, N)
 
         # Reorder adjs to (num_comm_rounds, num_envs, N, N) for consistency.
         adj_matrices = jnp.transpose(jnp.asarray(adjs_grouped), (1, 0, 2, 3))
@@ -387,7 +364,6 @@ class MAGICMAPPO(CategoricalMAPPO):
             policy = self.policies[uid]
             preprocessed_obs = self._state_preprocessor[uid](states[uid])
 
-            # Extract this agent's aggregated messages: (num_envs, message_dim)
             agent_agg_messages = processed_grouped[:, i, :]
 
             with jax.default_device(policy.device):
@@ -409,7 +385,7 @@ class MAGICMAPPO(CategoricalMAPPO):
 
             actions[uid] = agent_actions
             log_prob[uid] = agent_log_prob
-            # Override comm tensors to be the shared ones (same for all agents).
+
             agent_outputs["adj_matrices"] = adj_matrices
             agent_outputs["hard_adj"] = hard_adj
             agent_outputs["messages"] = raw_messages
@@ -422,16 +398,6 @@ class MAGICMAPPO(CategoricalMAPPO):
 
         self._current_log_prob = log_prob
         return actions, log_prob, outputs
-
-    # ------------------------------------------------------------------
-    # Recurrent (LSTM/GRU) hidden-state plumbing.
-    #
-    # The state is laid out env-major to mirror `_act_homogeneous`'s
-    # `stacked_obs` reshape:
-    #     stacked_obs.row[k] ↔ env e=k//N, agent a=k%N
-    # Per-agent state buffer is `(num_envs, hidden_size)` (or a tuple for
-    # LSTM); stacking produces `(num_envs * num_agents, hidden_size)`.
-    # ------------------------------------------------------------------
 
     def _ensure_hidden_state(self, num_envs: int) -> None:
         """Allocate zero hidden state on first use or when num_envs changes."""
@@ -600,30 +566,7 @@ class MAGICMAPPO(CategoricalMAPPO):
             self._reset_hidden_state(dones)
 
     def _shuffle_buffer_indices(self, buffer_size: int) -> np.ndarray:
-        """Shuffle indices for one training epoch.
-
-        **Homogeneous** (shared policy): shuffles at the *timestep* level,
-        keeping same-timestep agent observations adjacent.  The pooled
-        buffer has layout::
-
-            [agent_0_t0, agent_0_t1, ..., agent_1_t0, agent_1_t1, ...]
-
-        where each agent block has ``M = buffer_size // num_agents`` rows.
-        Row ``t`` in agent_0's block and row ``t`` in agent_1's block
-        correspond to the *same* environment timestep.
-
-        We create an interleaved permutation::
-
-            [agent_0_tσ(0), agent_1_tσ(0), agent_0_tσ(1), agent_1_tσ(1), ...]
-
-        so consecutive groups of ``N`` rows are from the same timestep.
-        The policy's ``__call__`` reshapes to ``(B // N, N, obs_dim)``
-        and each group is a valid communication graph.
-
-        **Heterogeneous** (per-agent policies): each agent's policy is
-        updated on its own data independently, so there is no need to
-        preserve agent pairing.  Falls back to a plain random permutation.
-        """
+        """Shuffle indices for one training epoch."""
         if not self._shared_policy:
             # Heterogeneous: no agent-pairing constraint.
             return np.random.permutation(buffer_size)

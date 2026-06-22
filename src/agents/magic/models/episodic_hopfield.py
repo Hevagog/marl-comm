@@ -2,13 +2,8 @@
 
 Replaces the LSTM/GRU cell at the §4.1 Eq.3 slot with a content-addressable
 retrieval over a rolling buffer of the last T per-agent observation
-encodings — i.e. a *modern* Hopfield network (Ramsauer et al. 2021 §3.3)
-where the pattern matrix is the agent's own short-term episodic memory
-rather than a static prototype bank.
+encodings — i.e. a *modern* Hopfield network (Ramsauer et al. 2021 §3.3).
 
-Carry layout (flat for compatibility with the existing TBPTT(1) side-buffer):
-    carry : (B, T * H) float32
-    Reshaped internally to (B, T, H). Index 0 = oldest, T-1 = newest.
 
 Update rule per step:
     h_query  = x_t                                  # (B, H)
@@ -19,14 +14,9 @@ Update rule per step:
     new_buffer = roll-and-append(buffer, x_t)       # drop oldest, push newest
 
 Initialisation:
-- gate ≡ 0 → sigmoid(gate) = 0.5 (NOT −2.0/sigmoid≈0.12 — the
-  HopfieldSelfContext starvation pathology).
+- gate ≡ 0 → sigmoid(gate) = 0.5.
 - β learnable scalar, init 1.0.
 - buffer zeros at episode start. At t=0 retrieved = 0, so h_t = x_t.
-
-The pattern matrix is non-learned (it's just stored values), but β and
-gate provide the only differentiable knobs — gradients flow through the
-current-step retrieval, mirroring TBPTT(1) for LSTM/GRU.
 """
 
 from __future__ import annotations
@@ -87,17 +77,14 @@ class EpisodicHopfieldEncoder(nn.Module):
 
         # Pre-retrieval LayerNorm (Schlag et al. 2021 §3.2). Without it the
         # query/key magnitudes drift and β does double duty (controlling both
-        # noise rejection and attention sharpness). With LN, β is the only
-        # knob for sharpness, and the retrieval cleanly interpolates between
-        # boxcar averaging (β small) and winner-take-most retrieval (β large).
+        # noise rejection and attention sharpness).
         norm = nn.LayerNorm(name="retrieval_ln")
         x_q = norm(x)
         # LayerNorm normalises over the last axis; apply to the whole
         # buffer of shape (B, T, H) — it normalises along H per slot.
         buffer_k = norm(buffer)
 
-        # Retrieve over the *current* buffer (excludes x_t — consistent with
-        # an episodic memory of strictly past observations).
+        # Retrieve over the *current* buffer.
         scores = beta * jnp.einsum("bth,bh->bt", buffer_k, x_q)  # (B, T)
         attn = jax.nn.softmax(scores, axis=-1)
         retrieved = jnp.einsum("bt,bth->bh", attn, buffer)  # (B, H)
@@ -105,7 +92,6 @@ class EpisodicHopfieldEncoder(nn.Module):
         h_t = x + jax.nn.sigmoid(gate) * retrieved
 
         # Roll-and-append: drop the oldest slot, push x_t to the newest.
-        # No int head index needed.
         new_buffer = jnp.concatenate([buffer[:, 1:, :], x[:, None, :]], axis=1)
         new_carry = new_buffer.reshape(B, T * H)
         return new_carry, h_t

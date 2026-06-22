@@ -28,8 +28,6 @@ def _broadcast_carry_to_batch(carry, batch_size: int):
             return x
         if x.shape[0] == 1:
             return jnp.broadcast_to(x, (batch_size,) + x.shape[1:])
-        # Generic mismatch: replace with zeros — this protects against
-        # stale carries from a different batch size showing up at init.
         return jnp.zeros((batch_size,) + x.shape[1:], dtype=x.dtype)
 
     if isinstance(carry, tuple):
@@ -37,7 +35,7 @@ def _broadcast_carry_to_batch(carry, batch_size: int):
     return fix(carry)
 
 
-# Orthogonal init gains (following MAPPO paper, Yu et al. 2021)
+# Orthogonal init gains
 _HIDDEN_GAIN = jnp.sqrt(2.0)
 _OUTPUT_GAIN = 0.01
 
@@ -198,10 +196,14 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         object.__setattr__(self, "episodic_buffer_size", int(episodic_buffer_size))
         object.__setattr__(self, "episodic_beta_init", float(episodic_beta_init))
         object.__setattr__(self, "episodic_gate_init", float(episodic_gate_init))
-        object.__setattr__(self, "hopfield_num_prototypes", int(hopfield_num_prototypes))
+        object.__setattr__(
+            self, "hopfield_num_prototypes", int(hopfield_num_prototypes)
+        )
         object.__setattr__(self, "hopfield_beta_init", float(hopfield_beta_init))
         object.__setattr__(self, "hopfield_gate_init", float(hopfield_gate_init))
-        object.__setattr__(self, "hopfield_freeze_prototypes", bool(hopfield_freeze_prototypes))
+        object.__setattr__(
+            self, "hopfield_freeze_prototypes", bool(hopfield_freeze_prototypes)
+        )
 
     @property
     def recurrent_carry_size(self) -> int:
@@ -265,13 +267,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             if temperature_override is not None
             else jnp.asarray(self.gumbel_temperature, dtype=jnp.float32)
         )
-        # IS-ratio fix (ported from magic_hopfield variant): zero Gumbel
-        # noise when computing log_probs at PPO update time so the rollout
-        # and training adjacency samples coincide.
+
         training_mode = inputs.get("taken_actions", None) is not None
-        _gumbel_scale = jnp.asarray(
-            0.0 if training_mode else 1.0, dtype=jnp.float32
-        )
+        _gumbel_scale = jnp.asarray(0.0 if training_mode else 1.0, dtype=jnp.float32)
 
         # Observation encoder e(o_i^t) — FC + tanh per MAGIC §4.1
         obs_enc = nn.Dense(
@@ -282,12 +280,9 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         )(x)
         obs_enc = nn.tanh(obs_enc)  # (B, H)
 
-        # Optional recurrent cell (MAGIC §4.1 Eq. 3):
+        # Recurrent cell (MAGIC §4.1 Eq. 3):
         #   h_i^t, c_i^t = LSTM(e(o_i^t), h_i^{t-1}, c_i^{t-1})
         # Hidden state is supplied by `MAGICMAPPO` via `inputs["recurrent_state"]`
-        # during rollout (stateful across calls, reset on dones). When absent
-        # (e.g. during PPO update from skrl `RandomMemory`, init pass, or any
-        # caller that doesn't carry state) we fall back to a zero carry
         new_recurrent_state = None
         if self.recurrent_type is not None:
             carry_width = (
@@ -304,8 +299,12 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 hidden_size=self.recurrent_hidden_size,
                 recurrent_type=self.recurrent_type,
                 buffer_size=int(self.episodic_buffer_size),
-                beta_init=float(self.hopfield_beta_init if _is_ph else self.episodic_beta_init),
-                gate_init=float(self.hopfield_gate_init if _is_ph else self.episodic_gate_init),
+                beta_init=float(
+                    self.hopfield_beta_init if _is_ph else self.episodic_beta_init
+                ),
+                gate_init=float(
+                    self.hopfield_gate_init if _is_ph else self.episodic_gate_init
+                ),
                 num_prototypes=int(self.hopfield_num_prototypes),
                 freeze_prototypes=bool(self.hopfield_freeze_prototypes),
                 name="recurrent",
@@ -322,9 +321,6 @@ class MAGICPolicyNet(CategoricalMixin, Model):
         )(obs_enc)  # (B, message_dim)
 
         # encode_only mode: return messages without running the comm block.
-        # IMPORTANT: key off `role` (a static Python string), not an entry in
-        # `inputs`, to avoid boolean conversion of traced arrays under JIT.
-        # Used in heterogeneous MAGIC act() to collect per-agent messages.
         if role == "encode_only":
             # We still need to materialise the comm_block parameters so that
             # Flax can initialise them on the first call.  Run a dummy path.
@@ -344,7 +340,12 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov), jnp.full((1,), _gumbel_scale))
+            )(
+                _dummy_msg[None, :, :],
+                _dummy_key[None],
+                jnp.full((1,), _temp_ov),
+                jnp.full((1,), _gumbel_scale),
+            )
             # Also touch msg_decoder and action_fc layers.
             _dummy_proc = jnp.zeros((b, self.message_dim))
             _dummy_dec = nn.Dense(
@@ -410,7 +411,12 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                 gumbel_temperature=self.gumbel_temperature,
                 num_heads=self.num_heads,
                 name="comm_block",
-            )(_dummy_msg[None, :, :], _dummy_key[None], jnp.full((1,), _temp_ov), jnp.full((1,), _gumbel_scale))
+            )(
+                _dummy_msg[None, :, :],
+                _dummy_key[None],
+                jnp.full((1,), _temp_ov),
+                jnp.full((1,), _gumbel_scale),
+            )
         else:
             comm_active = (b >= n) and (b % n == 0)
             groups = b // n if comm_active else 1
@@ -421,10 +427,6 @@ class MAGICPolicyNet(CategoricalMixin, Model):
 
                 group_keys = jax.random.split(gumbel_rng, groups)
 
-                # vmap _CommunicateBlock over the groups axis.
-                # Returns (processed, adjs):
-                #   processed : (groups, N, message_dim)
-                #   adjs      : (groups, num_rounds, N, N)
                 VmappedComm = nn.vmap(
                     _CommunicateBlock,
                     variable_axes={"params": None},
@@ -438,7 +440,12 @@ class MAGICPolicyNet(CategoricalMixin, Model):
                     gumbel_temperature=self.gumbel_temperature,
                     num_heads=self.num_heads,
                     name="comm_block",
-                )(msg_grouped, group_keys, jnp.full((groups,), _temp_ov), jnp.full((groups,), _gumbel_scale))
+                )(
+                    msg_grouped,
+                    group_keys,
+                    jnp.full((groups,), _temp_ov),
+                    jnp.full((groups,), _gumbel_scale),
+                )
                 # processed_grouped : (groups, N, message_dim)
                 # adjs_grouped      : (groups, num_rounds, N, N)
 
@@ -560,12 +567,8 @@ class MAGICPolicyNet(CategoricalMixin, Model):
             subkey,
         )
 
-        # Always-present entries used by the base MAPPO training code.
         outputs["net_output"] = net_output
         outputs["stddev"] = net_output  # entropy relay expected by CategoricalMixin
-
-        # adj_matrices, hard_adj, messages, agg_messages are already in
-        # `outputs` — populated by __call__ above.  Nothing more to add.
 
         return actions, log_prob, outputs
 

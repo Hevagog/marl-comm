@@ -120,27 +120,25 @@ class HopfieldStateCell(nn.Module):
             prototypes = jax.lax.stop_gradient(prototypes)
 
         ln = nn.LayerNorm(name="retrieval_ln")
-        x_q = ln(x)                          # (B, H)
-        proto_k = ln(prototypes)             # (K, H)
+        x_q = ln(x)  # (B, H)
+        proto_k = ln(prototypes)  # (K, H)
 
         # Hopfield prototype retrieval (Ramsauer 2021 §3.3, Eq. 6):
         # scores = β · P_normed · q_t^T
         scores = beta * (x_q @ proto_k.T) / jnp.sqrt(float(H))  # (B, K)
-        attn   = jax.nn.softmax(scores, axis=-1)                  # (B, K)
+        attn = jax.nn.softmax(scores, axis=-1)  # (B, K)
         # Retrieve from raw (non-normalised) prototypes — retains scale info.
-        candidate = attn @ prototypes                              # (B, H)
+        candidate = attn @ prototypes  # (B, H)
 
         # GRU update gate (Cho et al. 2014): decide how much to snap to attractor.
-        gate_input = jnp.concatenate([x, carry], axis=-1)         # (B, 2H)
-        z = jax.nn.sigmoid(
-            nn.Dense(H, name="update_gate")(gate_input)
-        )                                                          # (B, H)
+        gate_input = jnp.concatenate([x, carry], axis=-1)  # (B, 2H)
+        z = jax.nn.sigmoid(nn.Dense(H, name="update_gate")(gate_input))  # (B, H)
 
-        new_carry = (1.0 - z) * carry + z * candidate             # (B, H)
+        new_carry = (1.0 - z) * carry + z * candidate  # (B, H)
 
         # Residual output — same convention as EpisodicHopfieldEncoder:
         # output = input + gated state, letting obs_enc pass through unobstructed
         # while the persistent state provides an additive correction.
-        h_t = x + jax.nn.sigmoid(gate) * new_carry                # (B, H)
+        h_t = x + jax.nn.sigmoid(gate) * new_carry  # (B, H)
 
         return new_carry, h_t

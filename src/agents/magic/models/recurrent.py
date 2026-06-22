@@ -1,4 +1,4 @@
-"""Optional recurrent encoder for MAGIC (LSTM / GRU).
+"""Recurrent encoder for MAGIC (LSTM / GRU).
 
 Implements the per-agent LSTM cell from MAGIC §4.1 Eq. 3:
 
@@ -29,14 +29,13 @@ row, matching skrl-torch's `ppo_rnn.py` TBPTT(1) convention.
 Limitation: the heterogeneous update path (`_update_per_agent_policies`)
 does not yet inject the carry — `sampled_recurrent_state` is omitted from
 that call site.  Current warehouse configs are homogeneous so this is not
-blocking.
+an issue.
 
 References
 ----------
-- Niu et al. 2021 "MAGIC" (AAMAS) §4.1 Eq. 3
+- Niu et al. 2021 "MAGIC"  §4.1 Eq. 3
 - Hochreiter & Schmidhuber 1997 (LSTM)
 - Cho et al. 2014 (GRU)
-- Flax `nn.OptimizedLSTMCell`, `nn.GRUCell`
 """
 
 from __future__ import annotations

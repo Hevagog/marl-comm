@@ -1,9 +1,4 @@
-"""Factory function for MAGIC models.
-
-Creates policy and value networks for all agents, following the same
-pattern as ``create_mappo_models`` but using MAGIC's communication-
-enhanced policy.
-"""
+"""Factory function for MAGIC models."""
 
 from __future__ import annotations
 
@@ -61,13 +56,9 @@ def create_magic_models(
     message encoder produces a fixed-size embedding (``message_dim``), these
     embeddings are gathered, the *first* agent's shared Scheduler +
     MessageProcessor is applied to them, and the aggregated messages are fed
-    back to each agent's decoder + action head.  Architecturally this matches
-    MAGIC §4 — the communication layers are shared across agents (parameter
-    sharing in message space), while the obs-to-message encoder and the
-    action head may differ.
+    back to each agent's decoder + action head.
 
-    The value network receives the shared state + one-hot agent-ID
-    (same as MAPPO, Yu et al. 2021 §5.2).
+    The value network receives the shared state + one-hot agent-ID same as MAPPO.
     """
     policy_cfg = cfg.get("policy", {})
     value_cfg = cfg.get("value", {})
@@ -86,7 +77,9 @@ def create_magic_models(
     hopfield_num_prototypes: int = int(magic_cfg.get("hopfield_num_prototypes", 16))
     hopfield_beta_init: float = float(magic_cfg.get("hopfield_beta_init", 1.0))
     hopfield_gate_init: float = float(magic_cfg.get("hopfield_gate_init", 0.0))
-    hopfield_freeze_prototypes: bool = bool(magic_cfg.get("hopfield_freeze_prototypes", False))
+    hopfield_freeze_prototypes: bool = bool(
+        magic_cfg.get("hopfield_freeze_prototypes", False)
+    )
 
     first_agent = possible_agents[0]
     act_space = action_spaces[first_agent]
@@ -148,8 +141,6 @@ def create_magic_models(
         # space.  The Scheduler and MessageProcessor (which operate purely in
         # message space) are architecturally independent of obs_dim, but each
         # MAGICPolicyNet instance has its own copy of these layers.
-        # MAGICMAPPO.act handles cross-agent communication explicitly
-        # (see MAGICMAPPO.act docstring for heterogeneous case).
         models = {}
         for agent in possible_agents:
             obs_space = observation_spaces[agent]
