@@ -38,14 +38,6 @@ class CommGraph(nn.Module):
     sparsity: float = 0.4
 
     def setup(self):
-        # stddev=0.1 matches the CommFormer reference implementation
-        # (github.com/charleshsc/CommFormer, graph.py).  With stddev=1.0,
-        # initial α differences dominate gradient updates: the STE path
-        # produces gradients of order ~1e-7 (measured), so top-k never
-        # flips from its random init and the learnable graph is
-        # effectively frozen.  With stddev=0.1, initial entries are on
-        # the same order as accumulated gradients over a few updates,
-        # allowing the top-k selection to reflect learned signal.
         self.alpha = self.param(
             "alpha",
             nn.initializers.normal(stddev=0.1),

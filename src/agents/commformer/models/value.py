@@ -13,7 +13,7 @@ function benefits from centralized training with full state access.
 
 References
 ----------
-- Hu et al. 2024 "CommFormer" (ICLR 2024), §3.2, Eq. 4.
+- Hu et al. 2024 "CommFormer", §3.2, Eq. 4.
 - Yu et al. 2021 "MAPPO", §5.2: agent-ID in critic.
 """
 

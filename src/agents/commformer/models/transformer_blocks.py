@@ -3,7 +3,7 @@ enhanced attention and adjacency masking.
 
 References
 ----------
-- Hu et al. 2024 "CommFormer" (ICLR 2024), §3.2.
+- Hu et al. 2024 "CommFormer" §3.2.
 - Encoder: Eqs. 1–4 (relation-enhanced attention + value projection).
 - Decoder: Eq. 5 (auto-regressive action generation with PPO).
 - Wen et al. 2022 "MAT": sequential update scheme for monotonic improvement.
@@ -16,19 +16,12 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-# GTrXL init (Parisotto et al. 2020, §3.4): near-zero init on residual output
-# projections (Wo in MHA, mlp2 in FFN) so each transformer sublayer acts as
-# near-identity at initialization.  Critical for transformer stability in RL.
-_HIDDEN_GAIN = jnp.sqrt(2.0)  # ReLU-compatible gain for hidden layers
-_OUTPUT_GAIN = 0.01           # Near-zero gain for sublayer output projections
+_HIDDEN_GAIN = jnp.sqrt(2.0)
+_OUTPUT_GAIN = 0.01  # Near-zero gain for sublayer output projections
 
 
 class EdgeEmbedding(nn.Module):
-    """Produces edge embeddings r_{i→j} from the adjacency matrix α.
-
-    CommFormer §3.2, Eq. 2: "r_{*→*} is obtained from an embedding layer
-    that takes the adjacency matrix α as input."
-    """
+    """Produces edge embeddings r_{i→j} from the adjacency matrix α."""
 
     embed_dim: int
 
@@ -49,13 +42,7 @@ class EdgeEmbedding(nn.Module):
 
 
 class RelationEnhancedMHA(nn.Module):
-    """Multi-head attention with edge embeddings and adjacency masking.
-
-    Implements CommFormer §3.2, Eqs. 2–3:
-        s_{ij} = (o_i + r_{i→j}) W_q^T W_k (o_j + r_{j→i})
-    with masking:
-        s_{ij} = -∞  if e_{j→i} = 0.
-    """
+    """Multi-head attention with edge embeddings and adjacency masking."""
 
     num_heads: int
     head_dim: int
@@ -138,8 +125,7 @@ class RelationEnhancedMHA(nn.Module):
         # Concatenate heads
         out = out.reshape(n, d)
 
-        # Output projection — GTrXL init (Parisotto 2020): near-zero scale
-        # so the MHA sublayer is near-identity at initialization.
+        # Output projection
         out = nn.Dense(
             query.shape[-1],
             kernel_init=nn.initializers.orthogonal(scale=_OUTPUT_GAIN),
@@ -173,8 +159,6 @@ class EncoderBlock(nn.Module):
         )(x, x, x, adj, edge_emb)
         x = x + residual
 
-        # MLP — hidden Dense uses ReLU gain; output Dense uses GTrXL near-zero
-        # so the FFN sublayer is near-identity at init.
         residual = x
         x = nn.LayerNorm(name="ln2")(x)
         x = nn.Dense(

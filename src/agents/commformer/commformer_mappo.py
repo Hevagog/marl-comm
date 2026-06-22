@@ -1,8 +1,7 @@
-"""CommFormer-enhanced MAPPO agent with bi-level optimization.
+"""CommFormer-enhanced MAPPO agent.
 
 Extends CategoricalMAPPO with an additional optimization step for
-the communication graph adjacency matrix α, implementing the
-bi-level optimization from CommFormer §3.3.1 (Eqs. 6–10).
+the communication graph adjacency matrix α.
 
 References
 ----------
@@ -31,11 +30,6 @@ _GRAPH_KEYS: frozenset[str] = frozenset({"adj_matrices"})
 class CommFormerMAPPO(CategoricalMAPPO):
     """MAPPO agent with CommFormer's learnable communication graph.
 
-    Overrides ``act`` so that all agents' observations are stacked into a
-    single batch before calling the shared policy.  This ensures the
-    CommFormerPolicyNet always receives ``batch_size = num_agents * num_envs``
-    (a multiple of N) and can run the full encoder-decoder pipeline instead
-    of falling back to the MLP path.
 
     The communication graph (adjacency matrix ``α``) is part of the
     policy network parameters and is optimized jointly via PPO.
@@ -67,19 +61,6 @@ class CommFormerMAPPO(CategoricalMAPPO):
 
         # Stack observations env-major: (num_envs, N, obs_dim) → (N*num_envs, obs_dim).
         # Each consecutive block of N rows = all N agents in the same environment.
-        # This matches the interleaved layout produced by _shuffle_buffer_indices
-        # during the PPO update, so rollout and training log-probs are consistent.
-        #
-        # BUG-C-003 fix: the previous agent-major concatenation (axis=0) placed
-        # all environments of agent-0 first, then agent-1, etc.  After reshape
-        # to (groups=num_envs, N, hidden_dim) in the policy, each "group" ended up
-        # containing observations from the SAME agent across different environments
-        # rather than DIFFERENT agents in the same environment.  The encoder's
-        # communication was therefore between environment-copies of one agent —
-        # completely wrong semantics.  At training time the interleaved buffer
-        # correctly groups N agents per timestep, so rollout and training
-        # log-probs were computed under different data distributions →
-        # ratio_max_abs_dev ≈ 1.8, ratio_clipped_frac ≈ 0.4, near-zero learning.
         preprocessed = [
             self._state_preprocessor[uid](states[uid]) for uid in self.possible_agents
         ]
@@ -96,14 +77,6 @@ class CommFormerMAPPO(CategoricalMAPPO):
         assert log_prob_all is not None, "log_prob_all should not be None"
 
         # Split results per agent.
-        #
-        # The stacked_obs layout is env-major (from jnp.stack(axis=1).reshape):
-        #   [env0/a0, env0/a1, ..., env0/aN-1, env1/a0, ..., envM/aN-1]
-        # so agent i's outputs sit at stride-N positions: i, N+i, 2N+i, …
-        # Using slice(i*num_envs, (i+1)*num_envs) here was an agent-major
-        # slice — correct for the old axis=0 concatenation (BUG-C-003) but
-        # wrong after the env-major stacking fix, producing 12/16 mismatched
-        # (obs, action, log_prob) triplets in the buffer and garbage IS ratios.
         n = len(self.possible_agents)
         actions: dict[str, jax.Array] = {}
         log_prob: dict[str, jax.Array] = {}
@@ -141,16 +114,6 @@ class CommFormerMAPPO(CategoricalMAPPO):
         batch to belong to the same group of N agents (same timestep).  This
         shuffle keeps same-timestep rows adjacent while randomising their
         order across mini-batches.
-
-        The pooled buffer layout is::
-
-            [agent_0_t0, agent_0_t1, ..., agent_{N-1}_t0, agent_{N-1}_t1, ...]
-
-        We produce an interleaved permutation::
-
-            [agent_0_tσ(0), agent_1_tσ(0), …, agent_0_tσ(1), agent_1_tσ(1), …]
-
-        so each consecutive block of N rows is a valid agent group.
         """
         n = len(self.possible_agents)
         M = buffer_size // n  # timesteps per agent
