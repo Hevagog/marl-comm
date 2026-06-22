@@ -116,7 +116,9 @@ def get_agent_observation(
         repair_pos = state.grid.repair_position
         if config.enable_battery:
             charger_positions = state.grid.charger_positions
-            charger_distances = np.abs(charger_positions - np.array([row, col])).sum(axis=1)
+            charger_distances = np.abs(charger_positions - np.array([row, col])).sum(
+                axis=1
+            )
             charger_pos = charger_positions[int(np.argmin(charger_distances))]
         else:
             charger_pos = np.array([row, col], dtype=np.int32)
@@ -205,10 +207,13 @@ def get_agent_observation(
 
     # ------  own heterogeneous properties (3 features) ------
     if config.enable_heterogeneous:
+        # Normalise capacity by the largest configured capacity so the feature
+        # stays in [0, 1] when the option set spans capacities above 2.
+        cap_norm = float(max(max(config.agent_capacity_options), 1))
         features.extend(
             [
                 state.agent.speed[agent_idx] / 2.0,
-                state.agent.capacity[agent_idx] / 2.0,
+                state.agent.capacity[agent_idx] / cap_norm,
                 state.agent.fragility[agent_idx],
             ]
         )
@@ -304,6 +309,10 @@ def apply_agent_attrition(
     """
     m = config.max_agents
     fp = config.fault_profile
+
+    # disable attrition
+    if not config.enable_attrition:
+        return state, np.zeros(m, dtype=np.bool_)
 
     # ---------- base uniform failures (modified by fragility) ----------
     thresholds = np.full(m, config.agent_failure_prob, dtype=np.float64)
@@ -488,8 +497,9 @@ def apply_battery_logic(
         if layout[r, c] == CellType.CHARGER and battery[i] < config.battery_capacity:
             new_charging[i] = True
 
-        # Battery dead → agent deactivated
-        if battery[i] <= 0:
+        # Battery dead → agent deactivated (skipped when attrition is disabled:
+        # a depleted battery can no longer strand an agent, so no rescue arises).
+        if battery[i] <= 0 and config.enable_attrition:
             new_active[i] = False
             new_charging[i] = False
             new_carrying[i] = 0

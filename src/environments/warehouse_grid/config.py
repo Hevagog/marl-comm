@@ -44,6 +44,11 @@ class WarehouseConfig:
     agent_failure_prob: float = 0.001
     comm_noise_prob: float = 0.1
 
+    # Master switch for the attrition/rescue sub-task.  When False, no agent can
+    # become inactive/stranded: uniform + burst failures are skipped and battery
+    # depletion can no longer deactivate an agent.
+    enable_attrition: bool = True
+
     # Observation settings
     vision_range: int = 3
 
@@ -72,8 +77,6 @@ class WarehouseConfig:
     # Within range: position + is_carrying + is_stranded visible (physically observable).
     # Not visible: battery, active flag, resource_phase, task state (all require radio).
     # Obs-dim is unchanged — same feature slots, zeroed where info requires comms.
-    # This creates a genuine information barrier: MAPPO acts blind to teammate state;
-    # CommFormer/MAT/MAM share local embeddings via model-level attention.
     no_comm: bool = False
 
     enable_task_deadlines: bool = False
