@@ -23,7 +23,7 @@ def _actions_homogeneous(spaces: dict[str, Any]) -> bool:
         return True
     first = next(iter(spaces.values()))
     for s in spaces.values():
-        if type(s) != type(first):
+        if type(s) is not type(first):
             return False
         if hasattr(s, "n") and s.n != first.n:
             return False

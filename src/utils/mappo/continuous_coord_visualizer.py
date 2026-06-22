@@ -611,7 +611,6 @@ def plot_trajectories(
         # Draw capture events as circles
         for ev in ep.capture_events:
             if ev.step < len(ep.steps):
-                step_rec = ep.steps[ev.step]
                 # Get centroid of agents near the target
                 tgt = (
                     ep.steps[ev.step].targets[ev.target_idx]

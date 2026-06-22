@@ -449,7 +449,7 @@ class OvercookedPettingZooEnv:
             ]:
                 locs = locs_fn()
                 if locs:
-                    dists = [abs(pos[0] - l[0]) + abs(pos[1] - l[1]) for l in locs]
+                    dists = [abs(pos[0] - loc[0]) + abs(pos[1] - loc[1]) for loc in locs]
                     features.append(min(dists) / max(w + h - 2, 1))
                 else:
                     features.append(1.0)

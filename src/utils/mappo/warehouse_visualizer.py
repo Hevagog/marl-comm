@@ -279,7 +279,6 @@ def fig_spatial_heatmaps(data: EvalData, out_dir: Path, prefix: str) -> None:
 
 
 def fig_battery_dynamics(data: EvalData, out_dir: Path, prefix: str) -> None:
-    n_agents = len(data.agents)
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), constrained_layout=True)
     fig.suptitle("Battery Dynamics Over Episode Time", fontsize=13, fontweight="bold")
 
@@ -378,7 +377,7 @@ def fig_role_comparison(data: EvalData, out_dir: Path, prefix: str) -> None:
         float(np.std(roles[a]["deliveries"])) if roles[a]["deliveries"] else 0.0
         for a in agent_names
     ]
-    bars = ax.bar(labels, means, color=colors, alpha=0.85, yerr=stds, capsize=4)
+    ax.bar(labels, means, color=colors, alpha=0.85, yerr=stds, capsize=4)
     ax.set_ylabel("Mean deliveries/episode")
     ax.set_title("Deliveries by Agent Role")
 
@@ -430,7 +429,7 @@ def fig_role_comparison(data: EvalData, out_dir: Path, prefix: str) -> None:
             role_vals.append(vals)
 
     if role_vals:
-        parts = ax.violinplot(role_vals, showmeans=True, showmedians=True)
+        ax.violinplot(role_vals, showmeans=True, showmedians=True)
         ax.set_xticks(range(1, len(role_labels_all) + 1))
         ax.set_xticklabels(role_labels_all)
         ax.set_ylabel("Deliveries/episode")
@@ -453,7 +452,6 @@ def fig_task_pressure(data: EvalData, out_dir: Path, prefix: str) -> None:
     expired_mat = np.full((len(data.episodes), max_len), np.nan)
 
     for i, ep in enumerate(data.episodes):
-        prev_expired = 0
         for step in ep.steps:
             t = step.step
             if t >= max_len:
@@ -461,7 +459,6 @@ def fig_task_pressure(data: EvalData, out_dir: Path, prefix: str) -> None:
             pending_mat[i, t] = float(step.pending_tasks)
             # Convert cumulative expired to per-step delta (show increases)
             expired_mat[i, t] = float(step.expired_tasks_cumulative)
-            prev_expired = step.expired_tasks_cumulative
 
     # Top: pending tasks
     ax = axes[0]
@@ -605,7 +602,7 @@ def fig_throughput(data: EvalData, out_dir: Path, prefix: str) -> None:
     ax = axes[2]
     deliveries = [ep.total_deliveries for ep in data.episodes]
     lengths = [ep.length for ep in data.episodes]
-    efficiency = [d / max(l, 1) * 1000 for d, l in zip(deliveries, lengths)]
+    efficiency = [d / max(ln, 1) * 1000 for d, ln in zip(deliveries, lengths)]
     ax.scatter(
         lengths,
         deliveries,

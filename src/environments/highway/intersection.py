@@ -203,7 +203,6 @@ class IntersectionPettingZooEnv:
 
         # Per-agent crashed status from info if available
         per_agent_info = {}
-        crashed_vehicles = info.get("crashed", False)
         for i, agent in enumerate(self._possible_agents):
             agent_info = {"shared_reward": shared_reward}
             # Check if individual vehicle crashed

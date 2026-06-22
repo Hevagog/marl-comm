@@ -938,7 +938,6 @@ def fig_alpha_concentration(data: CommFormerAnalysisData, prefix: str):
     n = data.num_agents
     labels = _agent_labels(n)
     x = np.arange(n)
-    width = 0.28
 
     fig, axes = plt.subplots(1, 3, figsize=(max(12, 3 * n + 2), 4.5))
     fig.suptitle(

@@ -473,7 +473,6 @@ class BaseRunner(ABC):
 
         # Determine which output key holds adjacency data
         is_magic = agent_type in ("magic", "magic_hopfield")
-        is_commformer = agent_type in ("commformer", "commformerhm")
 
         def _np(v):
             try:

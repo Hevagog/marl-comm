@@ -854,8 +854,7 @@ def compute_encoder_variance_dynamics(
         if len(vecs) < 2:
             continue
         X = np.stack(vecs, axis=0)  # (T, D)
-        mean = X.mean(axis=1, keepdims=True)  # per-step mean across features (wrong)
-        # Actually: variance per step = variance across features for that agent
+        # Variance per step = variance across features for that agent
         variances = X.var(axis=1)  # (T,) — within-step feature variance
         result[i] = variances.astype(np.float32)
     return result

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 from collections.abc import Iterable
 
 import numpy as np

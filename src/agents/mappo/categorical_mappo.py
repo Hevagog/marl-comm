@@ -963,7 +963,6 @@ class CategoricalMAPPO(MAPPO):
             [per_agent_tensors[uid]["returns"] for uid in self.possible_agents], axis=0
         )
 
-        per_agent_buffer_size = per_agent_tensors[uid0]["states"].shape[0]
         pooled_buffer_size = all_shared_states.shape[0]
         value_batch_size = max(pooled_buffer_size // self._mini_batches[uid0], 1)
 
@@ -1129,9 +1128,6 @@ class CategoricalMAPPO(MAPPO):
     ) -> None:
         """Log training statistics to the experiment tracker."""
         n_batches = max(actual_batch_count, 1)
-
-        # Compute KL divergences per-agent for logging
-        kl_divergences_all: list[float] = []
 
         for uid in self.possible_agents:
             self.track_data(

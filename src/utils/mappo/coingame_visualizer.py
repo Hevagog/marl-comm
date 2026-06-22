@@ -154,7 +154,6 @@ def plot_overview(data: EvalData, save_path: Path | None = None) -> plt.Figure:
     for i, (agent, color, label) in enumerate(zip(agents, colors, labels)):
         # Pick reward portion: own_pickups * pick_reward + steals_made * pick_reward
         total_pickups = sum(ep.total_pickups_by(agent) for ep in data.episodes)
-        total_steals_made = sum(ep.steals_by(agent) for ep in data.episodes)
         total_victimized = sum(ep.steals_suffered_by(agent) for ep in data.episodes)
         n_ep = len(data)
         pick_component = total_pickups * data.pick_reward / n_ep
@@ -187,7 +186,6 @@ def plot_overview(data: EvalData, save_path: Path | None = None) -> plt.Figure:
     action_names = ["UP", "DOWN", "LEFT", "RIGHT"]
     n_actions = 4
     action_x = np.arange(n_actions)
-    offset = bar_w / 2
     for i, (agent, color, label) in enumerate(zip(agents, colors, labels)):
         all_actions = [
             s.actions.get(agent, -1) for ep in data.episodes for s in ep.steps
@@ -342,7 +340,6 @@ def plot_event_timelines(
     max_steps = max((ep.length for ep in episodes), default=1)
 
     for ax, ep in zip(axes, episodes):
-        ep_len = ep.length
         ax.set_xlim(-1, max_steps + 1)
         ax.set_ylim(-0.8, 0.8)
         ax.set_yticks([])
@@ -679,7 +676,6 @@ def plot_distance_analysis(data: EvalData, save_path: Path | None = None) -> plt
         if diffs:
             diffs_arr = np.array(diffs)
             n_coop = int(np.sum(diffs_arr > 0))
-            n_def = int(np.sum(diffs_arr <= 0))
             frac_coop = n_coop / len(diffs_arr)
 
             ax_right.hist(diffs_arr, bins=30, color=own_c, edgecolor="white", alpha=0.8)

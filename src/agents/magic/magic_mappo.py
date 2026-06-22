@@ -282,7 +282,6 @@ class MAGICMAPPO(CategoricalMAPPO):
         but message passing is centralised across all agents.
         """
         uid0 = self.possible_agents[0]
-        n = len(self.possible_agents)
 
         # Encode messages per agent (JIT'd)
         # Each call runs the agent-specific obs_encoder + msg_encoder.

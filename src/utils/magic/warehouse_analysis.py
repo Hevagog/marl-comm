@@ -172,14 +172,6 @@ class WarehouseCommStepRecord:
 
     @property
     def min_battery(self) -> float:
-        vals = [
-            v
-            for v in self.battery.values()
-            if self.active.get(
-                k := list(self.battery.keys())[list(self.battery.values()).index(v)],
-                True,
-            )
-        ]
         return float(min(self.battery.values())) if self.battery else 160.0
 
     @property
