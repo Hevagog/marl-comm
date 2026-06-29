@@ -173,7 +173,6 @@ def _jit_compute_gae_no_norm(
         "policy_act",
         "debug_entropy",
         "comm_reg_scale",
-        "diversity_loss_scale",
     ),
 )
 def _update_policy_fixed(
@@ -187,7 +186,6 @@ def _update_policy_fixed(
     entropy_loss_scale,
     debug_entropy,
     comm_reg_scale=0.0,
-    diversity_loss_scale=0.0,
     sampled_recurrent_state=None,
 ):
     """Like skrl's ``_update_policy`` but with two critical fixes:
@@ -214,7 +212,6 @@ def _update_policy_fixed(
 
     # Resolve at Python level so the conditional is not traced by JAX.
     use_comm_reg = comm_reg_scale > 0.0
-    use_diversity_reg = diversity_loss_scale > 0.0
 
     def _policy_loss(params):
         _inputs = {"states": sampled_states, "taken_actions": sampled_actions}
@@ -285,23 +282,6 @@ def _update_policy_fixed(
                     + (1.0 - density) * jnp.log(1.0 - density)
                 )
                 total_loss = total_loss - jnp.float32(comm_reg_scale) * h
-
-        # Hopfield memory prototype diversity regularization (MAMHM only).
-        # Penalises high cosine similarity between prototype pairs to prevent
-        # collapse where all queries retrieve the same pattern.
-        if use_diversity_reg:
-            decoder_params = params.get("params", {}).get("_decoder", {})
-            mb_params = decoder_params.get("memory_bank", {})
-            xi = mb_params.get("xi", None)
-            if xi is not None:
-                xi_norm = xi * jax.lax.rsqrt(
-                    jnp.sum(jnp.square(xi), axis=-1, keepdims=True) + 1e-6
-                )
-                sim = xi_norm @ xi_norm.T
-                mask = jnp.triu(jnp.ones_like(sim), k=1)
-                n_pairs = jnp.sum(mask)
-                div_loss = jnp.sum(mask * jnp.square(sim)) / jnp.maximum(n_pairs, 1.0)
-                total_loss = total_loss + diversity_loss_scale * div_loss
 
         diag = {
             "ratio_mean": ratio_mean,
@@ -851,7 +831,6 @@ class CategoricalMAPPO(MAPPO):
                     effective_entropy_loss_scale,
                     self.cfg.get("debug_entropy_stats", False),
                     self.cfg.get("comm_reg_scale", 0.0),
-                    self.cfg.get("diversity_loss_scale", 0.0),
                     sampled_recurrent_state=sampled_recurrent_state,
                 )
                 for k, v in diag.items():
@@ -1013,7 +992,6 @@ class CategoricalMAPPO(MAPPO):
                         effective_entropy_loss_scale,
                         self.cfg.get("debug_entropy_stats", False),
                         self.cfg.get("comm_reg_scale", 0.0),
-                        self.cfg.get("diversity_loss_scale", 0.0),
                     )
                     for k, v in diag.items():
                         cumulative_diag[k] = cumulative_diag.get(k, 0.0) + float(v)

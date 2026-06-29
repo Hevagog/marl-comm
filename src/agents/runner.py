@@ -447,8 +447,8 @@ class BaseRunner(ABC):
         right panel = live communication graph (directed graph with soft edge
         weights for MAGIC, static graph + dynamic representations for CommFormer).
 
-        Supported agent types: ``magic``, ``magic_hopfield``, ``commformer``,
-        ``commformerhm``.  Falls back to plain ``record()`` for other types.
+        Supported agent types: ``magic``, ``commformer``.  Falls back to plain
+        ``record()`` for other types.
         """
         import numpy as np
         import imageio  # type: ignore[import-untyped]
@@ -641,35 +641,7 @@ class BaseRunner(ABC):
             )
             return
 
-        if agent_type == "commformerhm":
-            from utils.commformer.runner import run_commformer_analysis
-
-            run_commformer_analysis(
-                self,
-                checkpoint_path,
-                n_episodes,
-                output_dir=f"{output_dir}/commformerhm",
-            )
-            return
-
-        if agent_type == "mamhm":
-            from utils.mam.hopfield_runner import run_mamhm_analysis
-
-            run_mamhm_analysis(
-                self,
-                checkpoint_path,
-                n_episodes,
-                output_dir=f"{output_dir}/mamhm",
-            )
-            return
-
-        if agent_type in (
-            "mam",
-            "mam_enc_only",
-            "mam_hopfield_pooling",
-            "mam_hopfield_layer",
-            "mam_et_encoder",
-        ):
+        if agent_type == "mam":
             from utils.mam.runner import run_mam_analysis
 
             run_mam_analysis(

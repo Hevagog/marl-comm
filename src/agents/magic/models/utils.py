@@ -22,8 +22,8 @@ def gumbel_softmax(
     (no gradient flows through it) while still being a traced value (enabling
     dynamic annealing without JIT recompilation).
 
-    ``gumbel_scale`` (Hu et al. 2024 ICLR §4.2 trick, ported from the
-    `magic_hopfield` variant) scales the additive Gumbel noise. 1.0 = standard
+    ``gumbel_scale`` (Hu et al. 2024 ICLR §4.2 trick) scales the additive
+    Gumbel noise. 1.0 = standard
     stochastic sampling (rollout). 0.0 = deterministic argmax of logits while
     keeping the STE topology. Used during PPO updates to align rollout and
     training adjacency samples and so keep the importance ratio at 1.0 at the

@@ -16,7 +16,7 @@ Usage
   python src/tune_mam.py --env warehouse \\
       --n-trials 40 --trial-timesteps 500000
 
-  # continuous_coord (MAM enc-only)
+  # continuous_coord (full MAM encoder-decoder)
   python src/tune_mam.py --env continuous_coord \\
       --n-trials 40 --trial-timesteps 500000
     
@@ -137,7 +137,7 @@ _WAREHOUSE_BASE: dict[str, Any] = {
 _CONTINUOUS_COORD_BASE: dict[str, Any] = {
     "experiment": {
         "name": "mam_tune_continuous_coord",
-        "agent_type": "mam_enc_only",
+        "agent_type": "mam",
         "directory": "runs/tune",
         "wandb": False,
         "wandb_kwargs": {},
@@ -296,10 +296,6 @@ def _get_runner_class(agent_type: str):
         from agents.mam.train import MAMRunner
 
         return MAMRunner
-    if agent_type == "mam_enc_only":
-        from agents.mam.train_ablations import MAMEncOnlyRunner
-
-        return MAMEncOnlyRunner
     raise ValueError(f"Unknown agent_type: {agent_type!r}")
 
 
